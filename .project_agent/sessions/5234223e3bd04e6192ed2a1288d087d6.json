@@ -1,0 +1,34 @@
+[
+  {
+    "role": "user",
+    "content": "请必须调用 echo 工具，参数 content=ping，不要直接回答。",
+    "tool_calls": [],
+    "tool_call_id": null
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "name": "echo",
+        "arguments": {
+          "content": "ping"
+        },
+        "call_id": "call_dQNAeqZGj7ZQAWlzsptGxC5I"
+      }
+    ],
+    "tool_call_id": null
+  },
+  {
+    "role": "tool",
+    "content": "{\"content\": \"echo: ping\", \"data\": null, \"error_code\": null, \"name\": \"echo\", \"retryable\": false, \"status\": \"ok\"}",
+    "tool_calls": [],
+    "tool_call_id": "call_dQNAeqZGj7ZQAWlzsptGxC5I"
+  },
+  {
+    "role": "assistant",
+    "content": "Mengqing，echo 工具已调用：ping",
+    "tool_calls": [],
+    "tool_call_id": null
+  }
+]

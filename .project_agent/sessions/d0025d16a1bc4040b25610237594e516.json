@@ -1,0 +1,14 @@
+[
+  {
+    "role": "user",
+    "content": "请必须调用 echo 工具，参数 content=ping，不要直接回答。",
+    "tool_calls": [],
+    "tool_call_id": null
+  },
+  {
+    "role": "assistant",
+    "content": "Mock response (turn 1): 请必须调用 echo 工具，参数 content=ping，不要直接回答。",
+    "tool_calls": [],
+    "tool_call_id": null
+  }
+]

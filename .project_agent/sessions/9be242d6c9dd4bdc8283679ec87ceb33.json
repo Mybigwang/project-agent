@@ -1,0 +1,14 @@
+[
+  {
+    "role": "user",
+    "content": "给你的prompt中都有什么信息？",
+    "tool_calls": [],
+    "tool_call_id": null
+  },
+  {
+    "role": "assistant",
+    "content": "Mengqing，你给我的 prompt / 上下文里主要包含这些信息：\n\n1. **系统信息**\n   - 当前我是通过 API 访问的 AI assistant。\n   - 当前日期：2026-04-28。\n   - 知识截止时间：2024-06。\n   - 最终回答默认不要过度冗长。\n\n2. **项目规则**\n   - 每次回复前都要用 **“Mengqing”** 作为称呼。\n   - 除非你主动要求，否则不能写兼容性代码。\n   - 当上下文达到 70% 时需要进行 compact。\n\n3. **仓库上下文**\n   - 当前项目是 `project-agent`。\n   - 分支：`main`。\n   - 当前 Git 状态里有大量新增文件和修改：\n     - `README.md` 被修改。\n     - `java-agent-second-brain-social-twin-plan.md` 被删除。\n     - 新增了 `.claude/`、`.editorconfig`、`.env.example`、`.github/`、`docs/`、`examples/`、`pyproject.toml`、`src/`、`tests/` 等。\n   - 最近提交：\n     - `4ee7b39 init commit`\n     - `b0ae002 Initial commit`\n\n4. **README 变化**\n   - 项目被描述为：\n     > Open-source Python CLI agent framework inspired by Claude Code.\n   - 包含快速开始命令：\n     - 创建虚拟环境\n     - `pip install -e .[dev]`\n     - `project-agent --help`\n     - `pytest`\n     - `ruff check .`\n     - `ruff format --check .`\n     - `mypy src`\n   - CLI 命令包括：\n     - `project-agent doctor`\n     - `project-agent version`\n     - `project-agent run`\n   - 配置优先级：\n     1. CLI options\n     2. Environment variables\n     3. TOML config file `[project_agent]`\n     4. Built-in defaults\n   - 支持 OpenAI-compatible chat completions endpoint。\n   - 如果没有配置 `PROJECT_AGENT_MODEL_BASE_URL` 和 `PROJECT_AGENT_API_KEY`，会使用内置 mock model。\n\n5. **关键代码文件摘要**\n   - `src/project_agent/cli.py`\n     - 使用 `typer` 实现 CLI。\n     - 有 `doctor`、`version`、`run` 命令。\n     - 会加载 settings、配置 logging、构建 runtime/model client/tools/session store 等。\n   - `tests/unit/test_cli.py`\n     - 测试 console script 是否指向 `project_agent.cli:main_entry`。\n     - 测试 help、doctor、run、trace、stream 等行为。\n   - `tests/unit/test_repository_context_relevance.py`\n     - 测试相关文件收集逻辑。\n     - 包括基于 prompt token、路径、内容、最近用户消息等匹配相关文件。\n\n6. **工作区信息**\n   - 根目录：\n     `F:\\work-zip\\java\\project-agent\\project-agent-3\\project-agent`\n   - 顶层目录包含：\n     - `.claude/`\n     - `.github/`\n     - `docs/`\n     - `examples/`\n     - `src/`\n     - `tests/`\n     - `CLAUDE.md`\n     - `README.md`\n     - `pyproject.toml`\n     - `claude-code-python-roadmap.md`\n   - 关键路径：\n     - `CLAUDE.md`\n     - `pyproject.toml`\n     - `src/`\n     - `tests/`\n\n7. **可用工具**\n   - 可以读写文件、编辑文件、列文件、搜索代码、运行命令。\n   - 也可以并行调用多个工具。\n   - 工具调用只能在需要操作仓库时使用。\n\n总体来说，你给我的上下文是在告诉我：这是一个 Python CLI Agent 框架项目，目标类似 Claude Code；当前仓库已经有 CLI、配置、runtime、context relevance、测试和文档骨架；同时要求我遵守项目里的回复风格和开发规则。",
+    "tool_calls": [],
+    "tool_call_id": null
+  }
+]

@@ -1,0 +1,26 @@
+[
+  {
+    "role": "user",
+    "content": "你好"
+  },
+  {
+    "role": "assistant",
+    "content": "Mock response (turn 1): 你好"
+  },
+  {
+    "role": "user",
+    "content": "你是谁"
+  },
+  {
+    "role": "assistant",
+    "content": "Mock response (turn 2): 你是谁"
+  },
+  {
+    "role": "user",
+    "content": "话说我能"
+  },
+  {
+    "role": "assistant",
+    "content": "Mock response (turn 3): 话说我能"
+  }
+]

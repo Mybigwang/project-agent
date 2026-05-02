@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+from pathlib import Path
+from uuid import uuid4
+
+import typer
+
+from project_agent import __version__
+from project_agent.config import Settings, load_settings
+from project_agent.core.interfaces import ModelClient, RepositoryContextBuilderProtocol, Tool
+from project_agent.core.types import AgentTraceStep, Message
+from project_agent.errors import AgentError, map_exception_to_exit_code
+from project_agent.logging import configure_logging
+from project_agent.runtime.agent import AgentRuntime
+from project_agent.runtime.context import RepositoryContextBuilder
+from project_agent.runtime.model_clients import MockModelClient, OpenAICompatibleModelClient
+from project_agent.runtime.session_store import FileSessionStore
+from project_agent.runtime.tools import EchoTool, build_default_tools
+
+CONFIG_OPTION = typer.Option(
+    None,
+    "--config",
+    exists=True,
+    file_okay=True,
+    dir_okay=False,
+)
+WORKSPACE_ROOT_OPTION = typer.Option(None, "--workspace-root")
+LOG_LEVEL_OPTION = typer.Option(None, "--log-level")
+DEFAULT_MODEL_OPTION = typer.Option(None, "--default-model")
+ENVIRONMENT_OPTION = typer.Option(None, "--environment")
+
+app = typer.Typer(help="Project Agent CLI.")
+
+
+@app.callback()
+def main(
+    ctx: typer.Context,
+    config: Path | None = CONFIG_OPTION,
+    workspace_root: Path | None = WORKSPACE_ROOT_OPTION,
+    log_level: str | None = LOG_LEVEL_OPTION,
+    default_model: str | None = DEFAULT_MODEL_OPTION,
+    environment: str | None = ENVIRONMENT_OPTION,
+) -> None:
+    overrides = {
+        key: value
+        for key, value in {
+            "workspace_root": str(workspace_root) if workspace_root else None,
+            "log_level": log_level,
+            "default_model": default_model,
+            "environment": environment,
+        }.items()
+        if value is not None
+    }
+    settings = load_settings(config_path=config, overrides=overrides)
+    configure_logging(settings.log_level)
+    ctx.obj = settings
+
+
+@app.command()
+def doctor(ctx: typer.Context) -> None:
+    settings = _require_settings(ctx.obj)
+    typer.echo(f"workspace_root={settings.workspace_root}")
+    typer.echo(f"log_level={settings.log_level}")
+    typer.echo(f"default_model={settings.default_model}")
+    typer.echo(f"model_base_url={settings.model_base_url or ''}")
+    typer.echo(f"model_api_key_configured={settings.model_api_key is not None}")
+    typer.echo(f"environment={settings.environment}")
+
+
+@app.command()
+def version() -> None:
+    typer.echo(__version__)
+
+
+@app.command()
+def run(
+    ctx: typer.Context,
+    prompt: str | None = typer.Option(None, "--prompt"),
+    session_id: str | None = typer.Option(None, "--session-id"),
+    trace: bool = typer.Option(False, "--trace/--no-trace"),
+    stream: bool | None = typer.Option(None, "--stream/--no-stream"),
+    max_steps: int | None = typer.Option(None, "--max-steps"),
+) -> None:
+    settings = _require_settings(ctx.obj)
+    runtime = AgentRuntime()
+    model_client = _build_model_client(settings)
+    session_store = FileSessionStore(settings.session_store_dir)
+    tools = [
+        EchoTool(),
+        *build_default_tools(
+            max_file_read_chars=settings.max_file_read_chars,
+            command_timeout_seconds=settings.command_timeout_seconds,
+            max_command_output_chars=settings.max_command_output_chars,
+        ),
+    ]
+    repository_context_builder = RepositoryContextBuilder(
+        max_repository_context_chars=settings.max_repository_context_chars,
+        max_git_diff_chars=settings.max_git_diff_chars,
+        max_rule_file_chars=settings.max_rule_file_chars,
+        max_relevant_files=settings.max_relevant_files,
+        max_relevant_file_chars=settings.max_relevant_file_chars,
+        recent_commits_count=settings.recent_commits_count,
+        context_command_timeout_seconds=settings.context_command_timeout_seconds,
+    )
+    active_session_id = session_id or uuid4().hex
+    active_max_steps = max_steps or settings.max_steps
+    should_stream = settings.stream_output if stream is None else stream
+
+    if prompt is not None:
+        _run_once(
+            runtime=runtime,
+            model_client=model_client,
+            session_store=session_store,
+            tools=tools,
+            settings=settings,
+            session_id=active_session_id,
+            user_input=prompt,
+            show_trace=trace,
+            stream_output=should_stream,
+            max_steps=active_max_steps,
+            repository_context_builder=repository_context_builder,
+            enable_repository_context=settings.enable_repository_context,
+        )
+        return
+
+    while True:
+        user_input = typer.prompt("You")
+        if user_input.strip() == "/exit":
+            typer.echo("Exiting interactive mode.")
+            return
+        _run_once(
+            runtime=runtime,
+            model_client=model_client,
+            session_store=session_store,
+            tools=tools,
+            settings=settings,
+            session_id=active_session_id,
+            user_input=user_input,
+            show_trace=trace,
+            stream_output=should_stream,
+            max_steps=active_max_steps,
+            repository_context_builder=repository_context_builder,
+            enable_repository_context=settings.enable_repository_context,
+        )
+
+
+def _run_once(
+    *,
+    runtime: AgentRuntime,
+    model_client: ModelClient,
+    session_store: FileSessionStore,
+    tools: list[Tool],
+    settings: Settings,
+    session_id: str,
+    user_input: str,
+    show_trace: bool,
+    stream_output: bool,
+    max_steps: int,
+    repository_context_builder: RepositoryContextBuilderProtocol,
+    enable_repository_context: bool,
+) -> None:
+    result = runtime.run_turn(
+        session_id=session_id,
+        user_input=user_input,
+        model_client=model_client,
+        tools=tools,
+        session_store=session_store,
+        workspace_root=settings.workspace_root,
+        max_steps=max_steps,
+        repository_context_builder=repository_context_builder,
+        enable_repository_context=enable_repository_context,
+    )
+    if stream_output:
+        _echo_streamed_output(result.final_message)
+    else:
+        typer.echo(result.final_message.content)
+    if show_trace:
+        _echo_trace(result.trace)
+
+
+def _echo_streamed_output(message: Message) -> None:
+    typer.echo(message.content)
+
+
+def _echo_trace(trace: tuple[AgentTraceStep, ...]) -> None:
+    for step in trace:
+        if step.event == "tool" and step.tool_name is not None:
+            status = "error" if step.is_error else "ok"
+            typer.echo(f"[step {step.step}] tool {step.tool_name} {status}: {step.summary}")
+
+
+def _build_model_client(settings: Settings) -> ModelClient:
+    if settings.model_base_url is None and settings.model_api_key is None:
+        return MockModelClient()
+    if settings.model_base_url is None:
+        raise AgentError("model_base_url is required when PROJECT_AGENT_API_KEY is set")
+    if settings.model_api_key is None:
+        raise AgentError("PROJECT_AGENT_API_KEY is required when model_base_url is set")
+    return OpenAICompatibleModelClient(
+        base_url=settings.model_base_url,
+        api_key=settings.model_api_key,
+        model=settings.default_model,
+    )
+
+
+def _require_settings(obj: object) -> Settings:
+    if not isinstance(obj, Settings):
+        raise AgentError("settings were not initialized")
+    return obj
+
+
+def main_entry() -> int:
+    try:
+        app()
+    except AgentError as error:
+        typer.echo(f"Error: {error}", err=True)
+        return map_exception_to_exit_code(error)
+    except Exception as error:  # pragma: no cover
+        typer.echo("Error: unexpected failure", err=True)
+        return map_exception_to_exit_code(error)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main_entry())

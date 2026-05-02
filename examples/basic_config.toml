@@ -1,0 +1,5 @@
+[project_agent]
+workspace_root = "."
+log_level = "info"
+default_model = "mock-model"
+environment = "development"
