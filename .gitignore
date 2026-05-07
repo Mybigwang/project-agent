@@ -11,3 +11,5 @@ build/
 dist/
 .idea/
 .vscode/
+/.project_agent/
+/.claude/
