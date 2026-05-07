@@ -15,7 +15,7 @@ from project_agent.logging import configure_logging
 from project_agent.runtime.agent import AgentRuntime
 from project_agent.runtime.context import RepositoryContextBuilder
 from project_agent.runtime.model_clients import MockModelClient, OpenAICompatibleModelClient
-from project_agent.runtime.planner import StaticPlanner
+from project_agent.runtime.planner import LLMPlanner
 from project_agent.runtime.session_store import FileSessionStore
 from project_agent.runtime.tools import EchoTool, build_default_tools
 
@@ -147,6 +147,14 @@ def run(
         )
 
 
+def _parse_command(text: str) -> tuple[str | None, str]:
+    text = text.strip()
+    if text.startswith("/"):
+        parts = text.split(maxsplit=1)
+        return parts[0], parts[1] if len(parts) > 1 else ""
+    return None, text
+
+
 def _run_once(
     *,
     runtime: AgentRuntime,
@@ -168,9 +176,21 @@ def _run_once(
         sys.stdout.write(char)
         sys.stdout.flush()
 
+    cmd, actual_input = _parse_command(user_input)
+    
+    planner = None
+    if cmd == "/plan":
+        planner = LLMPlanner(model_client=model_client)
+    elif cmd is not None:
+        typer.echo(f"Unknown command: {cmd}")
+        return
+
+    # If the user only types /plan with no arguments, we might still pass it,
+    # but actual_input will be empty. The model will handle it.
+    
     result = runtime.run_turn(
         session_id=session_id,
-        user_input=user_input,
+        user_input=actual_input,
         model_client=model_client,
         tools=tools,
         session_store=session_store,
@@ -178,7 +198,7 @@ def _run_once(
         max_steps=max_steps,
         repository_context_builder=repository_context_builder,
         enable_repository_context=enable_repository_context,
-        planner=StaticPlanner(),
+        planner=planner,
         stream_callback=stream_callback if stream_output else None,
     )
     if stream_output:

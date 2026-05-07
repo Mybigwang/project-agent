@@ -95,7 +95,8 @@ def _build_planning_messages(*, user_input: str, history: Sequence[Message]) -> 
                 "Break the user request into a JSON task plan. Return only JSON "
                 "with a tasks array. Each task must include id, title, "
                 "description, and optional dependencies. Use statuses only when "
-                "needed; default status is pending."
+                "needed; default status is pending. If the request is simple "
+                "and does not require multiple steps, return a single task."
             ),
         ),
         Message(
@@ -137,6 +138,15 @@ def _build_replanning_messages(
 
 
 def _parse_task_plan_json(content: str) -> TaskPlan:
+    content = content.strip()
+    if content.startswith("```json"):
+        content = content.removeprefix("```json")
+    elif content.startswith("```"):
+        content = content.removeprefix("```")
+    if content.endswith("```"):
+        content = content.removesuffix("```")
+    content = content.strip()
+
     try:
         payload = json.loads(content)
     except json.JSONDecodeError as error:

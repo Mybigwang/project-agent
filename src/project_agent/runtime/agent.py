@@ -73,7 +73,7 @@ class AgentRuntime:
         step = 1
         task_plan = self._refresh_blocked_statuses(task_plan)
 
-        while step <= max_steps:
+        while True:
             task = self._next_executable_task(task_plan)
             if task is None:
                 break
@@ -294,8 +294,9 @@ class AgentRuntime:
         )
         trace: tuple[AgentTraceStep, ...] = ()
         step = start_step
+        task_step = 0
 
-        while step <= max_steps:
+        while task_step < max_steps:
             response = model_client.complete(
                 messages=model_messages, tools=registry.tools, stream_callback=stream_callback
             )
@@ -339,6 +340,7 @@ class AgentRuntime:
                 for tool_result in tool_results
             )
             step += 1
+            task_step += 1
             if tool_results and tool_results[-1].is_error:
                 return _TaskRunResult(
                     messages=messages,
@@ -434,7 +436,7 @@ class AgentRuntime:
         return Message(
             role="system",
             content=(
-                "Execute only the current task.\n"
+                "Execute the current task. Do not explain this rule to the user when finished.\n"
                 f"Current task: {task.id} - {task.title}\n"
                 f"Description: {task.description}\n"
                 f"Completed tasks: {completed or 'none'}\n"
