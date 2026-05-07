@@ -7,8 +7,8 @@ from typer.testing import CliRunner
 import project_agent.cli as cli_module
 from project_agent.cli import app
 from project_agent.config import Settings
-from project_agent.core.types import Message
-from project_agent.errors import ConfigurationError
+from project_agent.core.types import AgentTraceStep, Message, Task, TaskPlan
+from project_agent.errors import AgentError, ConfigurationError
 
 runner = CliRunner()
 
@@ -76,6 +76,8 @@ def test_run_command_executes_runtime(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "Mock response (turn 1): hello" in result.stdout
+    assert "Tasks:" in result.stdout
+    assert "  - completed task_1: hello" in result.stdout
 
 
 def test_run_command_prints_trace_output(tmp_path: Path) -> None:
@@ -86,7 +88,9 @@ def test_run_command_prints_trace_output(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "Tool result (turn 1): echo: ping" in result.stdout
-    assert "[step 1] tool echo ok: echo: ping" in result.stdout
+    assert "  - completed task_1: use tool ping" in result.stdout
+    assert "[step 1] task task_1 in_progress ok: started use tool ping" in result.stdout
+    assert "[step 2] tool echo ok: echo: ping" in result.stdout
 
 
 def test_run_command_streams_output_when_enabled(tmp_path: Path) -> None:
@@ -119,7 +123,29 @@ def test_run_command_streaming_preserves_whitespace(
     )
 
     assert result.exit_code == 0
-    assert result.stdout == "line 1\n\nline  2\n"
+    assert result.stdout == "line 1\n\nline  2\nTasks:\n  - completed task_1: hello\n"
+
+
+def test_run_command_sanitizes_final_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class ControlCharacterModelClient:
+        name = "control-character-model"
+
+        def complete(self, *, messages: list[Message], tools: list[object]) -> Message:  # type: ignore[override]
+            return Message(role="assistant", content="ok\x1b[31m\rnext")
+
+    monkeypatch.setattr(cli_module, "MockModelClient", ControlCharacterModelClient)
+
+    result = runner.invoke(
+        app,
+        ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"],
+    )
+
+    assert result.exit_code == 0
+    assert "\x1b" not in result.stdout
+    assert "ok?[31m\\rnext" in result.stdout
 
 
 def test_run_command_streams_saved_response_without_second_model_call(
@@ -150,7 +176,7 @@ def test_run_command_streams_saved_response_without_second_model_call(
     )
 
     assert result.exit_code == 0
-    assert result.stdout == "response 1\n"
+    assert result.stdout == "response 1\nTasks:\n  - completed task_1: hello\n"
     assert model_client.complete_calls == 1
 
 
@@ -315,6 +341,30 @@ def test_run_command_passes_repository_context_settings_to_runtime(
     assert builder.recent_commits_count == 3
     assert builder.context_command_timeout_seconds == 4.0
 
+
+def test_task_progress_and_trace_sanitize_control_characters(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    task_plan = TaskPlan(tasks=(Task(id="task_1", title="bad\x1b[31m\r\ntext", description="bad"),))
+    trace = (
+        AgentTraceStep(
+            step=1,
+            event="task",
+            summary="started\x1b\r\nsummary",
+            task_id="task_1",
+            task_status="in_progress",
+        ),
+    )
+
+    cli_module._echo_task_progress(task_plan)
+    cli_module._echo_trace(trace)
+
+    captured = capsys.readouterr()
+    assert "\x1b" not in captured.out
+    assert "bad?[31m\\r\\ntext" in captured.out
+    assert "started?\\r\\nsummary" in captured.out
+
+
 def test_build_model_client_uses_openai_compatible_client_when_configured(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -349,3 +399,39 @@ def test_main_entry_maps_configuration_error(
     captured = capsys.readouterr()
     assert exit_code == 2
     assert "Error: invalid config" in captured.err
+
+
+def test_main_entry_preserves_agent_error_after_traceback_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def raise_agent_error() -> None:
+        error = AgentError("model request failed due to a network error")
+        error.__traceback__ = None
+        raise error
+
+    monkeypatch.setattr(cli_module, "app", raise_agent_error)
+
+    exit_code = cli_module.main_entry()
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Error: model request failed due to a network error" in captured.err
+
+
+def test_main_entry_prints_unexpected_error_type_without_message(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def raise_runtime_error() -> None:
+        raise RuntimeError("secret-token\x1b[31m\r\nnext")
+
+    monkeypatch.setattr(cli_module, "app", raise_runtime_error)
+
+    exit_code = cli_module.main_entry()
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Error: unexpected failure: RuntimeError" in captured.err
+    assert "secret-token" not in captured.err
+    assert "\x1b" not in captured.err

@@ -34,7 +34,13 @@
       "Bash(project-agent doctor:*)",
       "Bash(command -v project-agent)",
       "Bash(PYTHONIOENCODING=ascii project-agent run:*)",
-      "Bash(PYTHONPATH=src python:*)"
+      "Bash(PYTHONPATH=src python:*)",
+      "Bash(printf '\\\\n---FULLDIFF---\\\\n')",
+      "Bash(printf '\\\\n---\\\\n')",
+      "Bash(command -v bandit)",
+      "Bash(bandit -r \"/f/work-zip/java/project-agent/project-agent-3/project-agent/.claude/worktrees/agent-a835704a\")",
+      "Bash(command -v pytest)",
+      "Bash(bandit -q -r \"/f/work-zip/java/project-agent/project-agent-3/project-agent/src\")"
     ]
   }
 }

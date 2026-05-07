@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -8,12 +9,13 @@ import typer
 from project_agent import __version__
 from project_agent.config import Settings, load_settings
 from project_agent.core.interfaces import ModelClient, RepositoryContextBuilderProtocol, Tool
-from project_agent.core.types import AgentTraceStep, Message
+from project_agent.core.types import AgentTraceStep, Message, TaskPlan
 from project_agent.errors import AgentError, map_exception_to_exit_code
 from project_agent.logging import configure_logging
 from project_agent.runtime.agent import AgentRuntime
 from project_agent.runtime.context import RepositoryContextBuilder
 from project_agent.runtime.model_clients import MockModelClient, OpenAICompatibleModelClient
+from project_agent.runtime.planner import StaticPlanner
 from project_agent.runtime.session_store import FileSessionStore
 from project_agent.runtime.tools import EchoTool, build_default_tools
 
@@ -28,6 +30,7 @@ WORKSPACE_ROOT_OPTION = typer.Option(None, "--workspace-root")
 LOG_LEVEL_OPTION = typer.Option(None, "--log-level")
 DEFAULT_MODEL_OPTION = typer.Option(None, "--default-model")
 ENVIRONMENT_OPTION = typer.Option(None, "--environment")
+CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x1b]")
 
 app = typer.Typer(help="Project Agent CLI.")
 
@@ -159,6 +162,12 @@ def _run_once(
     repository_context_builder: RepositoryContextBuilderProtocol,
     enable_repository_context: bool,
 ) -> None:
+    import sys
+    
+    def stream_callback(char: str) -> None:
+        sys.stdout.write(char)
+        sys.stdout.flush()
+
     result = runtime.run_turn(
         session_id=session_id,
         user_input=user_input,
@@ -169,24 +178,53 @@ def _run_once(
         max_steps=max_steps,
         repository_context_builder=repository_context_builder,
         enable_repository_context=enable_repository_context,
+        planner=StaticPlanner(),
+        stream_callback=stream_callback if stream_output else None,
     )
     if stream_output:
-        _echo_streamed_output(result.final_message)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
     else:
-        typer.echo(result.final_message.content)
+        typer.echo(_sanitize_final_output(result.final_message.content))
+    _echo_task_progress(result.task_plan)
     if show_trace:
         _echo_trace(result.trace)
 
 
 def _echo_streamed_output(message: Message) -> None:
-    typer.echo(message.content)
+    typer.echo(_sanitize_final_output(message.content))
+
+
+def _echo_task_progress(task_plan: TaskPlan | None) -> None:
+    if task_plan is None:
+        return
+    typer.echo("Tasks:")
+    for task in task_plan.tasks:
+        typer.echo(f"  - {task.status} {task.id}: {_sanitize_cli_text(task.title)}")
 
 
 def _echo_trace(trace: tuple[AgentTraceStep, ...]) -> None:
     for step in trace:
+        if step.event == "task" and step.task_id is not None and step.task_status is not None:
+            status = "error" if step.is_error else "ok"
+            typer.echo(
+                f"[step {step.step}] task {step.task_id} "
+                f"{step.task_status} {status}: {_sanitize_cli_text(step.summary)}"
+            )
         if step.event == "tool" and step.tool_name is not None:
             status = "error" if step.is_error else "ok"
-            typer.echo(f"[step {step.step}] tool {step.tool_name} {status}: {step.summary}")
+            typer.echo(
+                f"[step {step.step}] tool {step.tool_name} {status}: "
+                f"{_sanitize_cli_text(step.summary)}"
+            )
+
+
+def _sanitize_final_output(value: str) -> str:
+    return CONTROL_CHAR_PATTERN.sub("?", value).replace("\r", "\\r")
+
+
+def _sanitize_cli_text(value: str) -> str:
+    return CONTROL_CHAR_PATTERN.sub("?", value).replace("\r", "\\r").replace("\n", "\\n")
 
 
 def _build_model_client(settings: Settings) -> ModelClient:
@@ -213,10 +251,10 @@ def main_entry() -> int:
     try:
         app()
     except AgentError as error:
-        typer.echo(f"Error: {error}", err=True)
+        typer.echo(f"Error: {_sanitize_cli_text(str(error))}", err=True)
         return map_exception_to_exit_code(error)
     except Exception as error:  # pragma: no cover
-        typer.echo("Error: unexpected failure", err=True)
+        typer.echo(f"Error: unexpected failure: {type(error).__name__}", err=True)
         return map_exception_to_exit_code(error)
     return 0
 

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from project_agent.core.types import Message, RepositoryContext, ToolCall, ToolResult
+from project_agent.core.types import (
+    Message,
+    RepositoryContext,
+    SessionState,
+    TaskPlan,
+    ToolCall,
+    ToolResult,
+)
 
 
 class Plugin(Protocol):
@@ -30,7 +37,8 @@ class ModelClient(Protocol):
         *,
         messages: Sequence[Message],
         tools: Sequence[Tool],
-    ) -> Message | ToolCall: ...
+        stream_callback: Callable[[str], None] | None = None,
+    ) -> Message | tuple[ToolCall, ...]: ...
 
 
 @runtime_checkable
@@ -44,9 +52,23 @@ class StreamingModelClient(Protocol):
 
 
 class SessionStore(Protocol):
-    def load(self, session_id: str) -> Sequence[Message]: ...
+    def load(self, session_id: str) -> SessionState: ...
 
-    def save(self, session_id: str, messages: Sequence[Message]) -> None: ...
+    def save(self, session_id: str, state: SessionState) -> None: ...
+
+
+class Planner(Protocol):
+    def create_plan(self, *, user_input: str, history: Sequence[Message]) -> TaskPlan: ...
+
+    def replan_after_failure(
+        self,
+        *,
+        user_input: str,
+        history: Sequence[Message],
+        task_plan: TaskPlan,
+        failed_task_id: str,
+        error: str,
+    ) -> TaskPlan: ...
 
 
 class RepositoryContextBuilderProtocol(Protocol):

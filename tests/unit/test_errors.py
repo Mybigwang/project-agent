@@ -7,6 +7,14 @@ def test_agent_error_uses_its_exit_code() -> None:
     assert map_exception_to_exit_code(error) == 3
 
 
+def test_agent_error_allows_traceback_assignment() -> None:
+    error = AgentError("boom")
+
+    error.__traceback__ = None
+
+    assert error.__traceback__ is None
+
+
 def test_configuration_error_uses_stable_exit_code() -> None:
     error = ConfigurationError("invalid config")
 

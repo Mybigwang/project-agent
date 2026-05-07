@@ -6,7 +6,7 @@ import json
 import socket
 import ssl
 import urllib.parse
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,7 +14,8 @@ from project_agent.core.interfaces import StreamingModelClient, Tool
 from project_agent.core.types import Message, ToolCall
 from project_agent.errors import AgentError
 
-MAX_MODEL_RESPONSE_BYTES = 1_000_000
+MAX_MODEL_RESPONSE_BYTES = 16_000_000
+MAX_TOOL_CALLS_PER_RESPONSE = 20
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,7 @@ class OpenAICompatibleModelClient(StreamingModelClient):
         base_url: str,
         api_key: str,
         model: str,
-        timeout_seconds: float = 60.0,
+        timeout_seconds: float = 600.0,
     ) -> None:
         self.name = model
         self._base_url = _validate_base_url(base_url)
@@ -67,7 +68,8 @@ class OpenAICompatibleModelClient(StreamingModelClient):
         *,
         messages: Sequence[Message],
         tools: Sequence[Tool],
-    ) -> Message | ToolCall:
+        stream_callback: Callable[[str], None] | None = None,
+    ) -> Message | tuple[ToolCall, ...]:
         payload: dict[str, Any] = {
             "model": self.name,
             "messages": tuple(_serialize_message(message) for message in messages),
@@ -75,8 +77,43 @@ class OpenAICompatibleModelClient(StreamingModelClient):
         serialized_tools = _serialize_tools(tools)
         if serialized_tools:
             payload = {**payload, "tools": serialized_tools, "tool_choice": "auto"}
+
+        if stream_callback is not None:
+            payload["stream"] = True
+            return self._accumulate_stream_chat_completions(payload, stream_callback)
+
         raw_response = self._post_chat_completions(payload)
         return _parse_chat_response(raw_response)
+
+    def _accumulate_stream_chat_completions(
+        self, payload: dict[str, object], stream_callback: Callable[[str], None]
+    ) -> Message | tuple[ToolCall, ...]:
+        body = json.dumps(payload).encode("utf-8")
+        path = f"{self._base_url.path}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "Host": self._base_url.host_header,
+        }
+        try:
+            context = ssl.create_default_context()
+            connection = _PinnedHTTPSConnection(
+                base_url=self._base_url,
+                timeout=self._timeout_seconds,
+                context=context,
+            )
+            try:
+                connection.request("POST", path, body=body, headers=headers)
+                response = connection.getresponse()
+                if response.status >= 400:
+                    raise AgentError(f"model stream request failed with HTTP {response.status}")
+                return _parse_accumulated_stream(response, stream_callback)
+            finally:
+                connection.close()
+        except AgentError:
+            raise
+        except OSError as error:
+            raise AgentError("model stream request failed due to a network error") from error
 
     def stream_complete(
         self,
@@ -84,10 +121,43 @@ class OpenAICompatibleModelClient(StreamingModelClient):
         messages: Sequence[Message],
         tools: Sequence[Tool],
     ) -> Iterable[str]:
-        response = self.complete(messages=messages, tools=tools)
-        if isinstance(response, ToolCall):
-            return ()
-        return (response.content,)
+        payload: dict[str, Any] = {
+            "model": self.name,
+            "messages": tuple(_serialize_message(message) for message in messages),
+            "stream": True,
+        }
+        serialized_tools = _serialize_tools(tools)
+        if serialized_tools:
+            payload = {**payload, "tools": serialized_tools, "tool_choice": "auto"}
+        return self._stream_chat_completions(payload)
+
+    def _stream_chat_completions(self, payload: dict[str, object]) -> Iterable[str]:
+        body = json.dumps(payload).encode("utf-8")
+        path = f"{self._base_url.path}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "Host": self._base_url.host_header,
+        }
+        try:
+            context = ssl.create_default_context()
+            connection = _PinnedHTTPSConnection(
+                base_url=self._base_url,
+                timeout=self._timeout_seconds,
+                context=context,
+            )
+            try:
+                connection.request("POST", path, body=body, headers=headers)
+                response = connection.getresponse()
+                if response.status >= 400:
+                    raise AgentError(f"model request failed with HTTP {response.status}")
+                yield from _iter_stream_content(response)
+            finally:
+                connection.close()
+        except AgentError:
+            raise
+        except OSError as error:
+            raise AgentError("model request failed due to a network error") from error
 
     def _post_chat_completions(self, payload: dict[str, object]) -> dict[str, object]:
         body = json.dumps(payload).encode("utf-8")
@@ -136,29 +206,38 @@ class MockModelClient(StreamingModelClient):
         *,
         messages: Sequence[Message],
         tools: Sequence[Tool],
-    ) -> Message | ToolCall:
+        stream_callback: Callable[[str], None] | None = None,
+    ) -> Message | tuple[ToolCall, ...]:
         user_message = self._last_message(messages, role="user")
         tool_message = self._find_last_message(messages, role="tool")
         turn = self._turn_count(messages)
 
         if user_message.content == "loop forever":
-            return ToolCall(name="echo", arguments={"content": "loop"})
+            return (ToolCall(name="echo", arguments={"content": "loop"}, call_id="call_loop"),)
         if user_message.content == "missing tool" and tool_message is None:
-            return ToolCall(name="missing", arguments={})
+            return (ToolCall(name="missing", arguments={}, call_id="call_missing"),)
         if user_message.content == "boom tool" and tool_message is None:
-            return ToolCall(name="boom", arguments={})
+            return (ToolCall(name="boom", arguments={}, call_id="call_boom"),)
         if user_message.content.startswith("use tool ") and tool_message is None:
-            return ToolCall(
-                name="echo", arguments={"content": user_message.content.removeprefix("use tool ")}
+            return (
+                ToolCall(
+                    name="echo",
+                    arguments={"content": user_message.content.removeprefix("use tool ")},
+                    call_id="call_echo",
+                ),
             )
         if tool_message is not None:
-            return Message(
-                role="assistant",
-                content=f"Tool result (turn {turn}): {self._tool_payload(tool_message)}",
-            )
-        return Message(
-            role="assistant", content=f"Mock response (turn {turn}): {user_message.content}"
-        )
+            content = f"Tool result (turn {turn}): {self._tool_payload(tool_message)}"
+            if stream_callback:
+                for word in content.split():
+                    stream_callback(word + " ")
+            return Message(role="assistant", content=content)
+        
+        content = f"Mock response (turn {turn}): {user_message.content}"
+        if stream_callback:
+            for word in content.split():
+                stream_callback(word + " ")
+        return Message(role="assistant", content=content)
 
     def stream_complete(
         self,
@@ -167,7 +246,7 @@ class MockModelClient(StreamingModelClient):
         tools: Sequence[Tool],
     ) -> Iterable[str]:
         response = self.complete(messages=messages, tools=tools)
-        if isinstance(response, ToolCall):
+        if not isinstance(response, Message):
             return ()
         return tuple(response.content.split())
 
@@ -274,7 +353,148 @@ def _resolve_public_host(host: str) -> str:
     raise AgentError("model_base_url host must resolve to a public IP address")
 
 
-def _parse_chat_response(response: dict[str, object]) -> Message | ToolCall:
+def _iter_stream_content(response: http.client.HTTPResponse) -> Iterable[str]:
+    received_bytes = 0
+    while True:
+        line = response.readline(MAX_MODEL_RESPONSE_BYTES + 1)
+        if not line:
+            return
+        received_bytes += len(line)
+        if received_bytes > MAX_MODEL_RESPONSE_BYTES:
+            raise AgentError("model response exceeded maximum size")
+        text = line.decode("utf-8").strip()
+        if not text or text.startswith(":") or not text.startswith("data:"):
+            continue
+        data = text.removeprefix("data:").strip()
+        if data == "[DONE]":
+            return
+        chunk = _parse_stream_chunk(data)
+        if chunk:
+            yield chunk
+
+
+def _parse_accumulated_stream(
+    response: http.client.HTTPResponse, stream_callback: Callable[[str], None]
+) -> Message | tuple[ToolCall, ...]:
+    received_bytes = 0
+    full_content = ""
+    # tool_calls_data format: { index: {"id": call_id, "name": name, "arguments": accumulated_args} }
+    tool_calls_data: dict[int, dict[str, str]] = {}
+    
+    while True:
+        line = response.readline(MAX_MODEL_RESPONSE_BYTES + 1)
+        if not line:
+            break
+        received_bytes += len(line)
+        if received_bytes > MAX_MODEL_RESPONSE_BYTES:
+            raise AgentError("model stream response exceeded maximum size")
+        text = line.decode("utf-8").strip()
+        if not text or text.startswith(":") or not text.startswith("data:"):
+            continue
+        data = text.removeprefix("data:").strip()
+        if data == "[DONE]":
+            break
+            
+        try:
+            parsed = json.loads(data)
+        except json.JSONDecodeError as error:
+            raise AgentError("model stream event must be valid JSON") from error
+            
+        if not isinstance(parsed, dict):
+            raise AgentError("model stream event must be a JSON object")
+            
+        choices = parsed.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+            
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            raise AgentError("model stream event choice must be an object")
+            
+        delta = first_choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+            
+        # Parse content
+        content_chunk = delta.get("content")
+        if isinstance(content_chunk, str) and content_chunk:
+            full_content += content_chunk
+            stream_callback(content_chunk)
+            
+        # Parse tool calls
+        tool_calls_chunk = delta.get("tool_calls")
+        if isinstance(tool_calls_chunk, list):
+            for tc in tool_calls_chunk:
+                if not isinstance(tc, dict):
+                    continue
+                index = tc.get("index")
+                if not isinstance(index, int):
+                    continue
+                    
+                if index not in tool_calls_data:
+                    tool_calls_data[index] = {"id": "", "name": "", "arguments": ""}
+                    
+                tc_id = tc.get("id")
+                if isinstance(tc_id, str):
+                    tool_calls_data[index]["id"] = tc_id
+                    
+                function = tc.get("function")
+                if isinstance(function, dict):
+                    name = function.get("name")
+                    if isinstance(name, str):
+                        tool_calls_data[index]["name"] += name
+                        
+                    args = function.get("arguments")
+                    if isinstance(args, str):
+                        tool_calls_data[index]["arguments"] += args
+
+    if tool_calls_data:
+        tool_calls = []
+        # Sort by index to maintain correct order
+        for idx in sorted(tool_calls_data.keys()):
+            tc_dict = tool_calls_data[idx]
+            try:
+                args_obj = json.loads(tc_dict["arguments"] or "{}")
+            except json.JSONDecodeError as error:
+                raise AgentError("model stream tool call arguments must be valid JSON") from error
+                
+            tool_calls.append(
+                ToolCall(
+                    name=tc_dict["name"],
+                    arguments=args_obj,
+                    call_id=tc_dict["id"]
+                )
+            )
+        return tuple(tool_calls)
+
+    return Message(role="assistant", content=full_content)
+
+
+def _parse_stream_chunk(data: str) -> str:
+    try:
+        parsed = json.loads(data)
+    except json.JSONDecodeError as error:
+        raise AgentError("model stream event must be valid JSON") from error
+    if not isinstance(parsed, dict):
+        raise AgentError("model stream event must be a JSON object")
+    choices = parsed.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise AgentError("model stream event missing choices")
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise AgentError("model stream event choice must be an object")
+    delta = first_choice.get("delta")
+    if not isinstance(delta, dict):
+        raise AgentError("model stream event choice missing delta")
+    content = delta.get("content")
+    if content is None:
+        return ""
+    if not isinstance(content, str):
+        raise AgentError("model stream event content must be a string")
+    return content
+
+
+def _parse_chat_response(response: dict[str, object]) -> Message | tuple[ToolCall, ...]:
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
         raise AgentError("model response missing choices")
@@ -285,12 +505,12 @@ def _parse_chat_response(response: dict[str, object]) -> Message | ToolCall:
     if not isinstance(message, dict):
         raise AgentError("model response choice missing message")
 
-    tool_call = _parse_tool_call(message)
-    if tool_call is not None:
+    tool_calls = _parse_tool_calls(message)
+    if tool_calls is not None:
         content = message.get("content")
         if content not in (None, ""):
             raise AgentError("model response must not include content with tool_calls")
-        return tool_call
+        return tool_calls
 
     content = message.get("content")
     if content is None:
@@ -300,25 +520,32 @@ def _parse_chat_response(response: dict[str, object]) -> Message | ToolCall:
     return Message(role="assistant", content=content)
 
 
-def _parse_tool_call(message: dict[object, object]) -> ToolCall | None:
+def _parse_tool_calls(message: dict[object, object]) -> tuple[ToolCall, ...] | None:
     tool_calls = message.get("tool_calls")
     if tool_calls is None:
         return None
     if not isinstance(tool_calls, list) or not tool_calls:
         raise AgentError("model response tool_calls must be a non-empty list")
-    if len(tool_calls) > 1:
-        raise AgentError("model response returned multiple tool calls")
+    if len(tool_calls) > MAX_TOOL_CALLS_PER_RESPONSE:
+        raise AgentError("model response has too many tool calls")
+    parsed_tool_calls = tuple(_parse_tool_call(tool_call) for tool_call in tool_calls)
+    call_ids = tuple(tool_call.call_id for tool_call in parsed_tool_calls)
+    if len(call_ids) != len(set(call_ids)):
+        raise AgentError("model response tool call ids must be unique")
+    return parsed_tool_calls
 
-    first_tool_call = tool_calls[0]
-    if not isinstance(first_tool_call, dict):
+
+
+def _parse_tool_call(tool_call: object) -> ToolCall:
+    if not isinstance(tool_call, dict):
         raise AgentError("model response tool call must be an object")
-    call_id = first_tool_call.get("id")
+    call_id = tool_call.get("id")
     if not isinstance(call_id, str) or not call_id:
         raise AgentError("model response tool call missing id")
-    tool_call_type = first_tool_call.get("type")
+    tool_call_type = tool_call.get("type")
     if tool_call_type != "function":
         raise AgentError("model response tool call type must be function")
-    function = first_tool_call.get("function")
+    function = tool_call.get("function")
     if not isinstance(function, dict):
         raise AgentError("model response tool call missing function")
     name = function.get("name")
