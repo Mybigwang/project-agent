@@ -41,6 +41,7 @@ def parse_skill_frontmatter(frontmatter: str) -> SkillMetadata:
     description = values.get("description")
     when_to_use = values.get("when_to_use")
     user_invocable = values.get("user_invocable", True)
+    model_selectable = values.get("model_selectable", True)
     version = values.get("version")
     shell_interpolation = values.get("shell_interpolation", False)
 
@@ -54,6 +55,8 @@ def parse_skill_frontmatter(frontmatter: str) -> SkillMetadata:
         raise SkillError("skill when_to_use must be a string")
     if not isinstance(user_invocable, bool):
         raise SkillError("skill user_invocable must be a boolean")
+    if not isinstance(model_selectable, bool):
+        raise SkillError("skill model_selectable must be a boolean")
     if version is not None and not isinstance(version, str):
         raise SkillError("skill version must be a string")
     if not isinstance(shell_interpolation, bool):
@@ -64,6 +67,7 @@ def parse_skill_frontmatter(frontmatter: str) -> SkillMetadata:
         description=description.strip(),
         when_to_use=when_to_use.strip() if isinstance(when_to_use, str) else None,
         user_invocable=user_invocable,
+        model_selectable=model_selectable,
         version=version.strip() if isinstance(version, str) else None,
         shell_interpolation=shell_interpolation,
     )

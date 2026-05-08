@@ -16,6 +16,7 @@ from project_agent.core.types import (
     Message,
     RunResult,
     SessionState,
+    SkillCall,
     Task,
     TaskPlan,
     ToolCall,
@@ -24,6 +25,10 @@ from project_agent.core.types import (
 from project_agent.errors import AgentError, RuntimeLimitError
 from project_agent.runtime.model_clients import MAX_TOOL_CALLS_PER_RESPONSE
 from project_agent.runtime.tool_registry import ToolRegistry
+from project_agent.skills import SkillPromptPreprocessor, SkillRegistry, build_skill_invocation
+from project_agent.skills.errors import SkillError
+
+MAX_SKILL_CALLS_PER_TURN = 1
 
 
 class AgentRuntime:
@@ -41,6 +46,8 @@ class AgentRuntime:
         enable_repository_context: bool = True,
         planner: Planner | None = None,
         stream_callback: Callable[[str], None] | None = None,
+        skill_registry: SkillRegistry | None = None,
+        skill_preprocessor: SkillPromptPreprocessor | None = None,
     ) -> RunResult:
         state = session_store.load(session_id)
         history = state.messages
@@ -60,6 +67,8 @@ class AgentRuntime:
                 repository_context_builder=repository_context_builder,
                 enable_repository_context=enable_repository_context,
                 stream_callback=stream_callback,
+                skill_registry=skill_registry,
+                skill_preprocessor=skill_preprocessor,
             )
 
         task_plan = self._select_task_plan(
@@ -102,6 +111,8 @@ class AgentRuntime:
                 repository_context_builder=repository_context_builder,
                 enable_repository_context=enable_repository_context,
                 stream_callback=stream_callback,
+                skill_registry=skill_registry,
+                skill_preprocessor=skill_preprocessor,
             )
             messages = task_result.messages
             trace = trace + task_result.trace
@@ -204,6 +215,8 @@ class AgentRuntime:
         repository_context_builder: RepositoryContextBuilderProtocol | None,
         enable_repository_context: bool,
         stream_callback: Callable[[str], None] | None,
+        skill_registry: SkillRegistry | None,
+        skill_preprocessor: SkillPromptPreprocessor | None,
     ) -> RunResult:
         model_messages = self._build_model_messages(
             history=history,
@@ -212,8 +225,10 @@ class AgentRuntime:
             workspace_root=workspace_root,
             repository_context_builder=repository_context_builder,
             enable_repository_context=enable_repository_context,
+            skill_registry=skill_registry,
         )
         trace: tuple[AgentTraceStep, ...] = ()
+        skill_calls_used = 0
 
         for step in range(1, max_steps + 1):
             response = model_client.complete(
@@ -230,6 +245,20 @@ class AgentRuntime:
                     ),
                 )
                 return RunResult(final_message=response, messages=final_messages, trace=trace)
+
+            if isinstance(response, SkillCall):
+                messages, model_messages, trace = self._apply_skill_call(
+                    response=response,
+                    messages=messages,
+                    model_messages=model_messages,
+                    trace=trace,
+                    step=step,
+                    skill_calls_used=skill_calls_used,
+                    skill_registry=skill_registry,
+                    skill_preprocessor=skill_preprocessor,
+                )
+                skill_calls_used += 1
+                continue
 
             executed_tool_calls, tool_results, tool_messages = self._run_tool_calls(
                 response=response,
@@ -279,6 +308,8 @@ class AgentRuntime:
         repository_context_builder: RepositoryContextBuilderProtocol | None,
         enable_repository_context: bool,
         stream_callback: Callable[[str], None] | None,
+        skill_registry: SkillRegistry | None,
+        skill_preprocessor: SkillPromptPreprocessor | None,
     ) -> _TaskRunResult:
         model_messages = self._build_model_messages(
             history=history,
@@ -287,6 +318,7 @@ class AgentRuntime:
             workspace_root=workspace_root,
             repository_context_builder=repository_context_builder,
             enable_repository_context=enable_repository_context,
+            skill_registry=skill_registry,
         )
         model_messages = (
             self._task_context_message(task=task, task_plan=task_plan),
@@ -295,6 +327,7 @@ class AgentRuntime:
         trace: tuple[AgentTraceStep, ...] = ()
         step = start_step
         task_step = 0
+        skill_calls_used = 0
 
         while task_step < max_steps:
             response = model_client.complete(
@@ -317,6 +350,23 @@ class AgentRuntime:
                     final_message=response,
                     error=None,
                 )
+
+            if isinstance(response, SkillCall):
+                messages, model_messages, trace = self._apply_skill_call(
+                    response=response,
+                    messages=messages,
+                    model_messages=model_messages,
+                    trace=trace,
+                    step=step,
+                    skill_calls_used=skill_calls_used,
+                    skill_registry=skill_registry,
+                    skill_preprocessor=skill_preprocessor,
+                    task_id=task.id,
+                )
+                step += 1
+                task_step += 1
+                skill_calls_used += 1
+                continue
 
             executed_tool_calls, tool_results, tool_messages = self._run_tool_calls(
                 response=response,
@@ -350,7 +400,6 @@ class AgentRuntime:
                     error=tool_results[-1].content,
                 )
 
-
         raise RuntimeLimitError(max_steps)
 
     def _build_model_messages(
@@ -362,17 +411,84 @@ class AgentRuntime:
         workspace_root: Path,
         repository_context_builder: RepositoryContextBuilderProtocol | None,
         enable_repository_context: bool,
+        skill_registry: SkillRegistry | None,
     ) -> tuple[Message, ...]:
-        if not enable_repository_context or repository_context_builder is None:
-            return messages
-        repository_context = repository_context_builder.build(
-            workspace_root=workspace_root,
-            user_input=user_input,
-            history=history,
+        model_messages = messages
+        if enable_repository_context and repository_context_builder is not None:
+            repository_context = repository_context_builder.build(
+                workspace_root=workspace_root,
+                user_input=user_input,
+                history=history,
+            )
+            if repository_context.rendered:
+                model_messages = (Message(role="system", content=repository_context.rendered), *model_messages)
+        skill_catalog_message = self._build_skill_catalog_message(skill_registry)
+        if skill_catalog_message is not None:
+            model_messages = (skill_catalog_message, *model_messages)
+        return model_messages
+
+    def _build_skill_catalog_message(self, skill_registry: SkillRegistry | None) -> Message | None:
+        if skill_registry is None:
+            return None
+        entries = skill_registry.catalog_entries()
+        if not entries:
+            return None
+        lines = [
+            "Available skills can be selected by returning JSON only in the form "
+            '{"skill":{"name":"skill-name","arguments":"optional args"}} when a skill clearly matches the request.',
+            "Only choose a skill when its when_to_use guidance strongly applies.",
+            "Do not choose more than one skill per turn.",
+            "Available skills:",
+        ]
+        for entry in entries:
+            when_to_use = entry.when_to_use or ""
+            lines.append(
+                f"- {entry.name}: {entry.description}" + (f" | when_to_use: {when_to_use}" if when_to_use else "")
+            )
+        return Message(role="system", content="\n".join(lines))
+
+    def _apply_skill_call(
+        self,
+        *,
+        response: SkillCall,
+        messages: tuple[Message, ...],
+        model_messages: tuple[Message, ...],
+        trace: tuple[AgentTraceStep, ...],
+        step: int,
+        skill_calls_used: int,
+        skill_registry: SkillRegistry | None,
+        skill_preprocessor: SkillPromptPreprocessor | None,
+        task_id: str | None = None,
+    ) -> tuple[tuple[Message, ...], tuple[Message, ...], tuple[AgentTraceStep, ...]]:
+        if skill_calls_used >= MAX_SKILL_CALLS_PER_TURN:
+            raise AgentError("model selected too many skills in one turn")
+        if skill_registry is None or skill_preprocessor is None:
+            raise AgentError("model selected a skill but skills are not configured")
+        skill = skill_registry.get(response.name)
+        if skill is None:
+            raise AgentError(f"model selected unknown skill: {response.name}")
+        if not skill.metadata.model_selectable:
+            raise AgentError(f"model selected non-selectable skill: {response.name}")
+        try:
+            invocation = build_skill_invocation(command_name=response.name, raw_args=response.raw_args)
+            expanded = skill_preprocessor.expand_invocation_body(invocation)
+        except SkillError as error:
+            raise AgentError(str(error)) from error
+        skill_message = Message(
+            role="system",
+            content=f"Activated skill: {response.name}\n\n{expanded}",
         )
-        if not repository_context.rendered:
-            return messages
-        return (Message(role="system", content=repository_context.rendered), *messages)
+        updated_messages = messages + (skill_message,)
+        updated_model_messages = model_messages + (skill_message,)
+        updated_trace = trace + (
+            AgentTraceStep(
+                step=step,
+                event="skill",
+                summary=f"activated {response.name}",
+                task_id=task_id,
+            ),
+        )
+        return updated_messages, updated_model_messages, updated_trace
 
     def _run_tool_calls(
         self,

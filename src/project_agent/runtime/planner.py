@@ -86,8 +86,21 @@ class LLMPlanner:
         return replanned
 
 
+def _format_skill_catalog_for_planner(skill_registry: object | None) -> str:
+    if skill_registry is None or not hasattr(skill_registry, "catalog_entries"):
+        return ""
+    entries = skill_registry.catalog_entries()
+    if not entries:
+        return ""
+    lines = ["\nAvailable execution-time skills:\n"]
+    for entry in entries:
+        when_to_use = f" | when_to_use: {entry.when_to_use}" if entry.when_to_use else ""
+        lines.append(f"- {entry.name}: {entry.description}{when_to_use}")
+    return "\n".join(lines)
+
+
 def _build_planning_messages(*, user_input: str, history: Sequence[Message]) -> tuple[Message, ...]:
-    previous_context = "\n".join(message.content for message in history[-6:] if message.content)
+    previous_context = "\n".join(message.content for message in history if message.content)
     return (
         Message(
             role="system",
@@ -97,6 +110,8 @@ def _build_planning_messages(*, user_input: str, history: Sequence[Message]) -> 
                 "description, and optional dependencies. Use statuses only when "
                 "needed; default status is pending. If the request is simple "
                 "and does not require multiple steps, return a single task."
+                "Please note that if the user's request involves significant complex changes,"
+                "please add review and fix tasks to the execution plan to ensure the plan's correctness and executability."
             ),
         ),
         Message(
@@ -117,7 +132,7 @@ def _build_replanning_messages(
     plan_json = json.dumps(
         _serialize_plan_for_prompt(task_plan), ensure_ascii=False, sort_keys=True
     )
-    previous_context = "\n".join(message.content for message in history[-6:] if message.content)
+    previous_context = "\n".join(message.content for message in history if message.content)
     return (
         Message(
             role="system",

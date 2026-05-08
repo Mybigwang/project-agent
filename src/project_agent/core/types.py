@@ -24,6 +24,13 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class SkillCall:
+    name: str
+    raw_args: str = ""
+    call_id: str | None = None
+
+
+@dataclass(frozen=True)
 class ToolResult:
     name: str
     content: str

@@ -31,14 +31,19 @@ class SkillPromptPreprocessor:
         self._runtime_settings = runtime_settings
 
     def expand_invocation(self, invocation: SkillInvocation) -> str:
+        return (
+            f"Skill: {invocation.skill_name}\n\n"
+            f"{self.expand_invocation_body(invocation)}"
+        )
+
+    def expand_invocation_body(self, invocation: SkillInvocation) -> str:
         skill = self._require_skill(invocation.skill_name)
-        expanded = self._expand_skill(
+        return self._expand_skill(
             skill=skill,
             invocation=invocation,
             depth=0,
             active_stack=(skill.metadata.name,),
         )
-        return f"Skill: {skill.metadata.name}\n\n{expanded}"
 
     def _expand_skill(
         self,

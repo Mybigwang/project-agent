@@ -74,6 +74,32 @@ def test_load_skills_rejects_invalid_frontmatter(tmp_path: Path) -> None:
         load_skills(builtin_root=None, user_root=None, project_root=project_root)
 
 
+
+
+def test_load_skills_parses_model_selectable_metadata(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    _write_skill(
+        project_root / "internal" / "SKILL.md",
+        "---\nname: internal\ndescription: hidden\nmodel_selectable: false\n---\nBody",
+    )
+
+    skills = load_skills(builtin_root=None, user_root=None, project_root=project_root)
+
+    assert len(skills) == 1
+    assert skills[0].metadata.model_selectable is False
+
+
+def test_load_skills_defaults_model_selectable_to_true(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    _write_skill(
+        project_root / "demo" / "SKILL.md",
+        "---\nname: demo\ndescription: demo\n---\nBody",
+    )
+
+    skills = load_skills(builtin_root=None, user_root=None, project_root=project_root)
+
+
+
 def _write_skill(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")

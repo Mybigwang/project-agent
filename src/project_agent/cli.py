@@ -228,6 +228,8 @@ def _run_once(
         enable_repository_context=enable_repository_context,
         planner=planner,
         stream_callback=stream_callback if stream_output else None,
+        skill_registry=skill_registry,
+        skill_preprocessor=skill_preprocessor,
     )
     if stream_output:
         if not streamed_output and result.final_message.content:

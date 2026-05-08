@@ -10,6 +10,7 @@ class SkillMetadata:
     description: str
     when_to_use: str | None = None
     user_invocable: bool = True
+    model_selectable: bool = True
     version: str | None = None
     shell_interpolation: bool = False
 
@@ -21,6 +22,13 @@ class Skill:
     source: str
     skill_dir: Path
     file_path: Path
+
+
+@dataclass(frozen=True)
+class SkillCatalogEntry:
+    name: str
+    description: str
+    when_to_use: str | None
 
 
 @dataclass(frozen=True)

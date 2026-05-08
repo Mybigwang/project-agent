@@ -8,6 +8,7 @@ from project_agent.core.types import (
     Message,
     RepositoryContext,
     SessionState,
+    SkillCall,
     TaskPlan,
     ToolCall,
     ToolResult,
@@ -38,7 +39,7 @@ class ModelClient(Protocol):
         messages: Sequence[Message],
         tools: Sequence[Tool],
         stream_callback: Callable[[str], None] | None = None,
-    ) -> Message | tuple[ToolCall, ...]: ...
+    ) -> Message | SkillCall | tuple[ToolCall, ...]: ...
 
 
 @runtime_checkable

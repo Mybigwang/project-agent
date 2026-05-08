@@ -217,6 +217,26 @@ def test_skill_preprocessor_rejects_command_substitution_without_frontmatter_opt
         preprocessor.expand_invocation(build_skill_invocation(command_name="/command", raw_args=""))
 
 
+
+
+def test_skill_preprocessor_expands_body_without_cli_wrapper(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    _write_skill(
+        project_root / "demo" / "SKILL.md",
+        "---\nname: demo\ndescription: demo skill\n---\nBody {{args[0]}}",
+    )
+    registry = SkillRegistry(
+        load_skills(builtin_root=None, user_root=None, project_root=project_root)
+    )
+    preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
+
+    expanded = preprocessor.expand_invocation_body(
+        build_skill_invocation(command_name="demo", raw_args="hello")
+    )
+
+    assert expanded == "Body hello"
+
+
 def _make_preprocessor(
     *,
     registry: SkillRegistry,

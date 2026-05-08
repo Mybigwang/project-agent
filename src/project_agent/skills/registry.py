@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from project_agent.skills.models import Skill
+from project_agent.skills.models import Skill, SkillCatalogEntry
 
 
 class SkillRegistry:
@@ -23,3 +23,16 @@ class SkillRegistry:
 
     def list_invocable(self) -> tuple[Skill, ...]:
         return tuple(skill for skill in self._skills if skill.metadata.user_invocable)
+
+    def list_model_selectable(self) -> tuple[Skill, ...]:
+        return tuple(skill for skill in self._skills if skill.metadata.model_selectable)
+
+    def catalog_entries(self) -> tuple[SkillCatalogEntry, ...]:
+        return tuple(
+            SkillCatalogEntry(
+                name=skill.metadata.name,
+                description=skill.metadata.description,
+                when_to_use=skill.metadata.when_to_use,
+            )
+            for skill in self.list_model_selectable()
+        )

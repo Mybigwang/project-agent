@@ -9,15 +9,18 @@ from project_agent.core.types import (
     Message,
     RepositoryContext,
     SessionState,
+    SkillCall,
     Task,
     TaskPlan,
     ToolCall,
     ToolResult,
 )
+from project_agent.errors import AgentError
 from project_agent.runtime.agent import AgentRuntime
 from project_agent.runtime.model_clients import MockModelClient
 from project_agent.runtime.session_store import InMemorySessionStore
 from project_agent.runtime.tools import EchoTool
+from project_agent.skills import SkillPromptPreprocessor, SkillRegistry, SkillRuntimeSettings, load_skills
 
 
 class BoomTool:
@@ -129,6 +132,69 @@ class MultiToolCallWithErrorModelClient:
                 ToolCall(name="side_effect", arguments={"content": "mutate"}, call_id="call_2"),
             )
         return Message(role="assistant", content="done")
+
+
+class SkillCallCapturingModelClient:
+    name = "skill-call-capturing-model"
+
+    def __init__(self) -> None:
+        self.calls: tuple[tuple[Message, ...], ...] = ()
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        stream_callback: object | None = None,
+    ) -> Message | SkillCall:
+        del tools, stream_callback
+        self.calls = (*self.calls, tuple(messages))
+        if len(self.calls) == 1:
+            return SkillCall(name="review-change", raw_args="src/module.py")
+        return Message(role="assistant", content="done")
+
+
+class RepeatedSkillCallModelClient:
+    name = "repeated-skill-call-model"
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        stream_callback: object | None = None,
+    ) -> SkillCall:
+        del messages, tools, stream_callback
+        return SkillCall(name="review-change", raw_args="src/module.py")
+
+
+class UnknownSkillCallModelClient:
+    name = "unknown-skill-call-model"
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        stream_callback: object | None = None,
+    ) -> SkillCall:
+        del messages, tools, stream_callback
+        return SkillCall(name="missing-skill")
+
+
+class NonSelectableSkillCallModelClient:
+    name = "non-selectable-skill-call-model"
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        stream_callback: object | None = None,
+    ) -> SkillCall:
+        del messages, tools, stream_callback
+        return SkillCall(name="internal-review")
+
 
 
 class StaticRepositoryContextBuilder:
@@ -637,27 +703,149 @@ def test_agent_runtime_does_not_resume_failed_blocked_task(
     assert result.task_plan.tasks[0].last_error == "boom"  # type: ignore[union-attr]
 
 
-def test_agent_runtime_retries_failed_task_once_then_replans(
+
+
+def test_agent_runtime_applies_model_selected_skill_and_continues(
     runtime: AgentRuntime,
     store: InMemorySessionStore,
     tmp_path: Path,
 ) -> None:
-    planner = SequencePlanner(
-        TaskPlan(tasks=(Task(id="task_1", title="Boom", description="Boom"),))
+    project_root = tmp_path / ".project_agent" / "skills"
+    _write_skill(
+        project_root / "review-change" / "SKILL.md",
+        (
+            "---\n"
+            "name: review-change\n"
+            "description: review code changes\n"
+            "when_to_use: when the user asks for a review\n"
+            "---\n"
+            "Review target {{args[0]}}"
+        ),
     )
+    registry = SkillRegistry(load_skills(builtin_root=None, user_root=None, project_root=project_root))
+    preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
+    model_client = SkillCallCapturingModelClient()
 
     result = runtime.run_turn(
         session_id="session-1",
-        user_input="boom tool",
-        model_client=AlwaysBoomModelClient(),  # type: ignore[arg-type]
-        tools=[EchoTool(), BoomTool()],
+        user_input="please review the change",
+        model_client=model_client,  # type: ignore[arg-type]
+        tools=[EchoTool()],
         session_store=store,
         workspace_root=tmp_path,
-        max_steps=8,
-        planner=planner,
+        max_steps=3,
+        skill_registry=registry,
+        skill_preprocessor=preprocessor,
     )
 
-    assert planner.replans == (("task_1", "tool execution failed: boom"),)
-    assert result.task_plan.tasks[0].status == "blocked"  # type: ignore[union-attr]
-    assert result.task_plan.tasks[0].last_error == "tool execution failed: boom"  # type: ignore[union-attr]
-    assert "Task task_1 blocked" in result.final_message.content
+    assert result.final_message.content == "done"
+    assert [step.event for step in result.trace] == ["skill", "assistant"]
+    assert any(message.content.startswith("Activated skill: review-change") for message in result.messages)
+    assert len(model_client.calls) == 2
+    assert any(
+        message.role == "system" and "Review target src/module.py" in message.content
+        for message in model_client.calls[1]
+    )
+
+
+def test_agent_runtime_rejects_unknown_model_selected_skill(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    registry = SkillRegistry(())
+    preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
+
+    with pytest.raises(AgentError, match="unknown skill"):
+        runtime.run_turn(
+            session_id="session-1",
+            user_input="please review the change",
+            model_client=UnknownSkillCallModelClient(),  # type: ignore[arg-type]
+            tools=[EchoTool()],
+            session_store=store,
+            workspace_root=tmp_path,
+            max_steps=3,
+            skill_registry=registry,
+            skill_preprocessor=preprocessor,
+        )
+
+
+def test_agent_runtime_rejects_non_selectable_model_selected_skill(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / ".project_agent" / "skills"
+    _write_skill(
+        project_root / "internal-review" / "SKILL.md",
+        (
+            "---\n"
+            "name: internal-review\n"
+            "description: internal review\n"
+            "user_invocable: false\n"
+            "model_selectable: false\n"
+            "---\n"
+            "Internal review"
+        ),
+    )
+    registry = SkillRegistry(load_skills(builtin_root=None, user_root=None, project_root=project_root))
+    preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
+
+    with pytest.raises(AgentError, match="non-selectable"):
+        runtime.run_turn(
+            session_id="session-1",
+            user_input="please review the change",
+            model_client=NonSelectableSkillCallModelClient(),  # type: ignore[arg-type]
+            tools=[EchoTool()],
+            session_store=store,
+            workspace_root=tmp_path,
+            max_steps=3,
+            skill_registry=registry,
+            skill_preprocessor=preprocessor,
+        )
+
+
+def test_agent_runtime_rejects_repeated_skill_selection_in_one_turn(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / ".project_agent" / "skills"
+    _write_skill(
+        project_root / "review-change" / "SKILL.md",
+        "---\nname: review-change\ndescription: review code changes\n---\nReview target {{args[0]}}",
+    )
+    registry = SkillRegistry(load_skills(builtin_root=None, user_root=None, project_root=project_root))
+    preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
+
+    with pytest.raises(AgentError, match="too many skills"):
+        runtime.run_turn(
+            session_id="session-1",
+            user_input="please review the change",
+            model_client=RepeatedSkillCallModelClient(),  # type: ignore[arg-type]
+            tools=[EchoTool()],
+            session_store=store,
+            workspace_root=tmp_path,
+            max_steps=3,
+            skill_registry=registry,
+            skill_preprocessor=preprocessor,
+        )
+
+
+def _make_preprocessor(
+    *,
+    registry: SkillRegistry,
+    workspace_root: Path,
+) -> SkillPromptPreprocessor:
+    return SkillPromptPreprocessor(
+        registry=registry,
+        workspace_root=workspace_root,
+        max_composition_depth=3,
+        max_expansion_chars=2000,
+        runtime_settings=SkillRuntimeSettings(allow_command_substitution=False),
+    )
+
+
+def _write_skill(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")

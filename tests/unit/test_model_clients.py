@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 import project_agent.runtime.model_clients as model_clients
-from project_agent.core.types import Message, ToolCall
+from project_agent.core.types import Message, SkillCall, ToolCall
 from project_agent.errors import AgentError
 from project_agent.runtime.model_clients import OpenAICompatibleModelClient
 
@@ -174,7 +174,7 @@ def test_openai_compatible_model_client_posts_chat_completions(
 
     assert response == Message(role="assistant", content="real response")
     assert _FakeConnection.captured["init"]["base_url"].connection_host == "93.184.216.34"
-    assert _FakeConnection.captured["init"]["timeout"] == 60.0
+    assert _FakeConnection.captured["init"]["timeout"] == 600.0
     assert _FakeConnection.captured["method"] == "POST"
     assert _FakeConnection.captured["path"] == "/v1/chat/completions"
     assert _FakeConnection.captured["headers"] == {
@@ -299,6 +299,9 @@ def test_openai_compatible_model_client_stream_rejects_missing_delta(
         tuple(client.stream_complete(messages=(Message(role="user", content="hello"),), tools=()))
 
 
+def test_openai_compatible_model_client_adds_tool_choice_when_tools_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = _make_client(monkeypatch)
 
     client.complete(
@@ -738,6 +741,63 @@ def test_openai_compatible_model_client_uses_later_public_dns_result(
     client.complete(messages=(Message(role="user", content="hello"),), tools=())
 
     assert _FakeConnection.captured["init"]["base_url"].connection_host == "93.184.216.34"
+
+
+
+
+def test_openai_compatible_model_client_stream_parses_skill_call_without_streaming_raw_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeConnection.raw_body = _stream_body_from_events(
+        (
+            _stream_event(
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": '{"skill":{"name":"debug-bug","arguments":"index"}}'
+                            }
+                        }
+                    ]
+                }
+            ),
+            "data: [DONE]\n\n",
+        )
+    )
+    client = _make_client(monkeypatch)
+    streamed_chunks: list[str] = []
+
+    response = client.complete(
+        messages=(Message(role="user", content="debug index"),),
+        tools=(),
+        stream_callback=streamed_chunks.append,
+    )
+
+    assert response == SkillCall(name="debug-bug", raw_args="index")
+    assert streamed_chunks == []
+
+
+def test_openai_compatible_model_client_preserves_plain_text_when_skill_payload_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeConnection.payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": '{"skill":{"name":"","arguments":"src/app.py"}}',
+                }
+            }
+        ]
+    }
+    client = _make_client(monkeypatch)
+
+    response = client.complete(messages=(Message(role="user", content="review this"),), tools=())
+
+    assert response == Message(
+        role="assistant",
+        content='{"skill":{"name":"","arguments":"src/app.py"}}',
+    )
 
 
 def test_openai_compatible_model_client_rejects_private_host(

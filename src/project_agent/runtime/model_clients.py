@@ -11,11 +11,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from project_agent.core.interfaces import StreamingModelClient, Tool
-from project_agent.core.types import Message, ToolCall
+from project_agent.core.types import Message, SkillCall, ToolCall
 from project_agent.errors import AgentError
 
 MAX_MODEL_RESPONSE_BYTES = 16_000_000
 MAX_TOOL_CALLS_PER_RESPONSE = 20
+SKILL_CALL_KEY = "skill"
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ class OpenAICompatibleModelClient(StreamingModelClient):
         messages: Sequence[Message],
         tools: Sequence[Tool],
         stream_callback: Callable[[str], None] | None = None,
-    ) -> Message | tuple[ToolCall, ...]:
+    ) -> Message | SkillCall | tuple[ToolCall, ...]:
         payload: dict[str, Any] = {
             "model": self.name,
             "messages": tuple(_serialize_message(message) for message in messages),
@@ -207,7 +208,7 @@ class MockModelClient(StreamingModelClient):
         messages: Sequence[Message],
         tools: Sequence[Tool],
         stream_callback: Callable[[str], None] | None = None,
-    ) -> Message | tuple[ToolCall, ...]:
+    ) -> Message | SkillCall | tuple[ToolCall, ...]:
         user_message = self._last_message(messages, role="user")
         tool_message = self._find_last_message(messages, role="tool")
         turn = self._turn_count(messages)
@@ -375,12 +376,12 @@ def _iter_stream_content(response: http.client.HTTPResponse) -> Iterable[str]:
 
 def _parse_accumulated_stream(
     response: http.client.HTTPResponse, stream_callback: Callable[[str], None]
-) -> Message | tuple[ToolCall, ...]:
+) -> Message | SkillCall | tuple[ToolCall, ...]:
     received_bytes = 0
     full_content = ""
     # tool_calls_data format: { index: {"id": call_id, "name": name, "arguments": accumulated_args} }
     tool_calls_data: dict[int, dict[str, str]] = {}
-    
+
     while True:
         line = response.readline(MAX_MODEL_RESPONSE_BYTES + 1)
         if not line:
@@ -394,34 +395,31 @@ def _parse_accumulated_stream(
         data = text.removeprefix("data:").strip()
         if data == "[DONE]":
             break
-            
+
         try:
             parsed = json.loads(data)
         except json.JSONDecodeError as error:
             raise AgentError("model stream event must be valid JSON") from error
-            
+
         if not isinstance(parsed, dict):
             raise AgentError("model stream event must be a JSON object")
-            
+
         choices = parsed.get("choices")
         if not isinstance(choices, list) or not choices:
             continue
-            
+
         first_choice = choices[0]
         if not isinstance(first_choice, dict):
             raise AgentError("model stream event choice must be an object")
-            
+
         delta = first_choice.get("delta")
         if not isinstance(delta, dict):
             continue
-            
-        # Parse content
+
         content_chunk = delta.get("content")
         if isinstance(content_chunk, str) and content_chunk:
             full_content += content_chunk
-            stream_callback(content_chunk)
-            
-        # Parse tool calls
+
         tool_calls_chunk = delta.get("tool_calls")
         if isinstance(tool_calls_chunk, list):
             for tc in tool_calls_chunk:
@@ -430,43 +428,48 @@ def _parse_accumulated_stream(
                 index = tc.get("index")
                 if not isinstance(index, int):
                     continue
-                    
+
                 if index not in tool_calls_data:
                     tool_calls_data[index] = {"id": "", "name": "", "arguments": ""}
-                    
+
                 tc_id = tc.get("id")
                 if isinstance(tc_id, str):
                     tool_calls_data[index]["id"] = tc_id
-                    
+
                 function = tc.get("function")
                 if isinstance(function, dict):
                     name = function.get("name")
                     if isinstance(name, str):
                         tool_calls_data[index]["name"] += name
-                        
+
                     args = function.get("arguments")
                     if isinstance(args, str):
                         tool_calls_data[index]["arguments"] += args
 
     if tool_calls_data:
         tool_calls = []
-        # Sort by index to maintain correct order
         for idx in sorted(tool_calls_data.keys()):
             tc_dict = tool_calls_data[idx]
             try:
                 args_obj = json.loads(tc_dict["arguments"] or "{}")
             except json.JSONDecodeError as error:
                 raise AgentError("model stream tool call arguments must be valid JSON") from error
-                
+
             tool_calls.append(
                 ToolCall(
                     name=tc_dict["name"],
                     arguments=args_obj,
-                    call_id=tc_dict["id"]
+                    call_id=tc_dict["id"],
                 )
             )
         return tuple(tool_calls)
 
+    skill_call = _parse_skill_call_content(full_content)
+    if skill_call is not None:
+        return skill_call
+
+    if full_content:
+        stream_callback(full_content)
     return Message(role="assistant", content=full_content)
 
 
@@ -494,7 +497,32 @@ def _parse_stream_chunk(data: str) -> str:
     return content
 
 
-def _parse_chat_response(response: dict[str, object]) -> Message | tuple[ToolCall, ...]:
+def _parse_skill_call_content(content: str) -> SkillCall | None:
+    stripped = content.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    skill_payload = payload.get(SKILL_CALL_KEY)
+    if not isinstance(skill_payload, dict):
+        return None
+    name = skill_payload.get("name")
+    raw_args = skill_payload.get("arguments", "")
+    call_id = skill_payload.get("id")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    if not isinstance(raw_args, str):
+        return None
+    if call_id is not None and not isinstance(call_id, str):
+        return None
+    return SkillCall(name=name.strip(), raw_args=raw_args.strip(), call_id=call_id)
+
+
+def _parse_chat_response(response: dict[str, object]) -> Message | SkillCall | tuple[ToolCall, ...]:
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
         raise AgentError("model response missing choices")
@@ -517,6 +545,9 @@ def _parse_chat_response(response: dict[str, object]) -> Message | tuple[ToolCal
         content = ""
     if not isinstance(content, str):
         raise AgentError("model response message content must be a string")
+    skill_call = _parse_skill_call_content(content)
+    if skill_call is not None:
+        return skill_call
     return Message(role="assistant", content=content)
 
 
