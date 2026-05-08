@@ -748,6 +748,43 @@ def test_agent_runtime_applies_model_selected_skill_and_continues(
     )
 
 
+
+
+def test_agent_runtime_emits_notification_for_model_selected_skill(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / ".project_agent" / "skills"
+    _write_skill(
+        project_root / "review-change" / "SKILL.md",
+        (
+            "---\n"
+            "name: review-change\n"
+            "description: review code changes\n"
+            "when_to_use: when the user asks for a review\n"
+            "---\n"
+            "Review target {{args[0]}}"
+        ),
+    )
+    registry = SkillRegistry(load_skills(builtin_root=None, user_root=None, project_root=project_root))
+    preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
+    notifications: list[str] = []
+
+    result = runtime.run_turn(
+        session_id="session-1",
+        user_input="please review the change",
+        model_client=SkillCallCapturingModelClient(),  # type: ignore[arg-type]
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        notification_callback=notifications.append,
+        skill_registry=registry,
+        skill_preprocessor=preprocessor,
+    )
+
+
 def test_agent_runtime_rejects_unknown_model_selected_skill(
     runtime: AgentRuntime,
     store: InMemorySessionStore,

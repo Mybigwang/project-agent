@@ -176,6 +176,17 @@ def _parse_command(text: str) -> tuple[str | None, str]:
     return None, text
 
 
+def _format_skill_catalog_for_planner(skill_registry: SkillRegistry) -> str | None:
+    entries = skill_registry.catalog_entries()
+    if not entries:
+        return None
+    return "\n".join(
+        f"- {entry.name}: {entry.description}"
+        + (f" | when_to_use: {entry.when_to_use}" if entry.when_to_use else "")
+        for entry in entries
+    )
+
+
 def _run_once(
     *,
     runtime: AgentRuntime,
@@ -202,11 +213,20 @@ def _run_once(
         sys.stdout.write(char)
         sys.stdout.flush()
 
+    def notification_callback(message: str) -> None:
+        if not stream_output:
+            return
+        sys.stdout.write(f"{_sanitize_cli_text(message)}\n")
+        sys.stdout.flush()
+
     cmd, actual_input = _parse_command(user_input)
 
     planner = None
     if cmd == "/plan":
-        planner = LLMPlanner(model_client=model_client)
+        planner = LLMPlanner(
+            model_client=model_client,
+            skill_catalog=_format_skill_catalog_for_planner(skill_registry),
+        )
     elif cmd is not None:
         skill = skill_registry.get(cmd.removeprefix("/"))
         if skill is None or not skill.metadata.user_invocable:
@@ -228,6 +248,7 @@ def _run_once(
         enable_repository_context=enable_repository_context,
         planner=planner,
         stream_callback=stream_callback if stream_output else None,
+        notification_callback=notification_callback,
         skill_registry=skill_registry,
         skill_preprocessor=skill_preprocessor,
     )

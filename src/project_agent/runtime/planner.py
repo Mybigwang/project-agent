@@ -49,11 +49,16 @@ class StaticPlanner:
 
 
 class LLMPlanner:
-    def __init__(self, *, model_client: ModelClient) -> None:
+    def __init__(self, *, model_client: ModelClient, skill_catalog: str | None = None) -> None:
         self._model_client = model_client
+        self._skill_catalog = skill_catalog
 
     def create_plan(self, *, user_input: str, history: Sequence[Message]) -> TaskPlan:
-        messages = _build_planning_messages(user_input=user_input, history=history)
+        messages = _build_planning_messages(
+            user_input=user_input,
+            history=history,
+            skill_catalog=self._skill_catalog,
+        )
         response = self._model_client.complete(messages=messages, tools=())
         if not isinstance(response, Message):
             raise AgentError("planner must return a message")
@@ -74,6 +79,7 @@ class LLMPlanner:
             task_plan=task_plan,
             failed_task_id=failed_task_id,
             error=error,
+            skill_catalog=self._skill_catalog,
         )
         response = self._model_client.complete(messages=messages, tools=())
         if not isinstance(response, Message):
@@ -86,21 +92,24 @@ class LLMPlanner:
         return replanned
 
 
-def _format_skill_catalog_for_planner(skill_registry: object | None) -> str:
-    if skill_registry is None or not hasattr(skill_registry, "catalog_entries"):
+def _format_skill_catalog_for_planner(skill_catalog: str | None) -> str:
+    if not skill_catalog:
         return ""
-    entries = skill_registry.catalog_entries()
-    if not entries:
-        return ""
-    lines = ["\nAvailable execution-time skills:\n"]
-    for entry in entries:
-        when_to_use = f" | when_to_use: {entry.when_to_use}" if entry.when_to_use else ""
-        lines.append(f"- {entry.name}: {entry.description}{when_to_use}")
-    return "\n".join(lines)
+    return (
+        "\n\nAvailable execution-time skills:\n"
+        f"{skill_catalog}\n\n"
+        "You may use these capabilities to inform task decomposition, but still return only JSON."
+    )
 
 
-def _build_planning_messages(*, user_input: str, history: Sequence[Message]) -> tuple[Message, ...]:
+def _build_planning_messages(
+    *,
+    user_input: str,
+    history: Sequence[Message],
+    skill_catalog: str | None,
+) -> tuple[Message, ...]:
     previous_context = "\n".join(message.content for message in history if message.content)
+    skill_catalog_section = _format_skill_catalog_for_planner(skill_catalog)
     return (
         Message(
             role="system",
@@ -112,6 +121,7 @@ def _build_planning_messages(*, user_input: str, history: Sequence[Message]) -> 
                 "and does not require multiple steps, return a single task."
                 "Please note that if the user's request involves significant complex changes,"
                 "please add review and fix tasks to the execution plan to ensure the plan's correctness and executability."
+                f"{skill_catalog_section}"
             ),
         ),
         Message(
@@ -128,11 +138,13 @@ def _build_replanning_messages(
     task_plan: TaskPlan,
     failed_task_id: str,
     error: str,
+    skill_catalog: str | None,
 ) -> tuple[Message, ...]:
     plan_json = json.dumps(
         _serialize_plan_for_prompt(task_plan), ensure_ascii=False, sort_keys=True
     )
     previous_context = "\n".join(message.content for message in history if message.content)
+    skill_catalog_section = _format_skill_catalog_for_planner(skill_catalog)
     return (
         Message(
             role="system",
@@ -140,6 +152,7 @@ def _build_replanning_messages(
                 "Revise the JSON task plan after a failed task. Return only JSON. "
                 "Preserve completed tasks exactly. Only change the failed task "
                 "and tasks depending on it."
+                f"{skill_catalog_section}"
             ),
         ),
         Message(

@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 import project_agent.cli as cli_module
 from project_agent.cli import app
 from project_agent.config import Settings
-from project_agent.core.types import AgentTraceStep, Message, Task, TaskPlan
+from project_agent.core.types import AgentTraceStep, Message, SkillCall, Task, TaskPlan
 from project_agent.errors import AgentError, ConfigurationError
 
 runner = CliRunner()
@@ -347,6 +347,57 @@ def test_run_command_reports_unknown_skill_command(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "Unknown command: /missing" in result.stdout
+
+
+
+
+def test_run_command_streaming_shows_skill_notification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skill_path = tmp_path / ".project_agent" / "skills" / "review-change" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True, exist_ok=True)
+    skill_path.write_text(
+        (
+            "---\n"
+            "name: review-change\n"
+            "description: review code changes\n"
+            "when_to_use: when the user asks for a review\n"
+            "---\n"
+            "Review target {{args[0]}}"
+        ),
+        encoding="utf-8",
+    )
+
+    class SkillThenMessageModelClient:
+        name = "skill-then-message-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(
+            self,
+            *,
+            messages: list[Message],
+            tools: list[object],
+            stream_callback: object | None = None,
+        ) -> Message | SkillCall:
+            del messages, tools, stream_callback
+            self.calls += 1
+            if self.calls == 1:
+                return SkillCall(name="review-change", raw_args="src/module.py")
+            return Message(role="assistant", content="done")
+
+    monkeypatch.setattr(cli_module, "MockModelClient", SkillThenMessageModelClient)
+
+    result = runner.invoke(
+        app,
+        ["--workspace-root", str(tmp_path), "run", "--prompt", "please review", "--stream"],
+    )
+
+    assert result.exit_code == 0
+    assert "正在调用 skill: review-change" in result.stdout
+    assert result.stdout.endswith("done\n")
 
 
 def test_run_command_supports_interactive_mode(tmp_path: Path) -> None:

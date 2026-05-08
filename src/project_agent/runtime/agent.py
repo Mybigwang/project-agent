@@ -29,6 +29,7 @@ from project_agent.skills import SkillPromptPreprocessor, SkillRegistry, build_s
 from project_agent.skills.errors import SkillError
 
 MAX_SKILL_CALLS_PER_TURN = 1
+NotificationCallback = Callable[[str], None]
 
 
 class AgentRuntime:
@@ -46,6 +47,7 @@ class AgentRuntime:
         enable_repository_context: bool = True,
         planner: Planner | None = None,
         stream_callback: Callable[[str], None] | None = None,
+        notification_callback: NotificationCallback | None = None,
         skill_registry: SkillRegistry | None = None,
         skill_preprocessor: SkillPromptPreprocessor | None = None,
     ) -> RunResult:
@@ -67,6 +69,7 @@ class AgentRuntime:
                 repository_context_builder=repository_context_builder,
                 enable_repository_context=enable_repository_context,
                 stream_callback=stream_callback,
+                notification_callback=notification_callback,
                 skill_registry=skill_registry,
                 skill_preprocessor=skill_preprocessor,
             )
@@ -111,6 +114,7 @@ class AgentRuntime:
                 repository_context_builder=repository_context_builder,
                 enable_repository_context=enable_repository_context,
                 stream_callback=stream_callback,
+                notification_callback=notification_callback,
                 skill_registry=skill_registry,
                 skill_preprocessor=skill_preprocessor,
             )
@@ -215,6 +219,7 @@ class AgentRuntime:
         repository_context_builder: RepositoryContextBuilderProtocol | None,
         enable_repository_context: bool,
         stream_callback: Callable[[str], None] | None,
+        notification_callback: NotificationCallback | None,
         skill_registry: SkillRegistry | None,
         skill_preprocessor: SkillPromptPreprocessor | None,
     ) -> RunResult:
@@ -256,6 +261,7 @@ class AgentRuntime:
                     skill_calls_used=skill_calls_used,
                     skill_registry=skill_registry,
                     skill_preprocessor=skill_preprocessor,
+                    notification_callback=notification_callback,
                 )
                 skill_calls_used += 1
                 continue
@@ -308,6 +314,7 @@ class AgentRuntime:
         repository_context_builder: RepositoryContextBuilderProtocol | None,
         enable_repository_context: bool,
         stream_callback: Callable[[str], None] | None,
+        notification_callback: NotificationCallback | None,
         skill_registry: SkillRegistry | None,
         skill_preprocessor: SkillPromptPreprocessor | None,
     ) -> _TaskRunResult:
@@ -361,6 +368,7 @@ class AgentRuntime:
                     skill_calls_used=skill_calls_used,
                     skill_registry=skill_registry,
                     skill_preprocessor=skill_preprocessor,
+                    notification_callback=notification_callback,
                     task_id=task.id,
                 )
                 step += 1
@@ -458,6 +466,7 @@ class AgentRuntime:
         skill_calls_used: int,
         skill_registry: SkillRegistry | None,
         skill_preprocessor: SkillPromptPreprocessor | None,
+        notification_callback: NotificationCallback | None,
         task_id: str | None = None,
     ) -> tuple[tuple[Message, ...], tuple[Message, ...], tuple[AgentTraceStep, ...]]:
         if skill_calls_used >= MAX_SKILL_CALLS_PER_TURN:
@@ -474,6 +483,8 @@ class AgentRuntime:
             expanded = skill_preprocessor.expand_invocation_body(invocation)
         except SkillError as error:
             raise AgentError(str(error)) from error
+        if notification_callback is not None:
+            notification_callback(f"正在调用 skill: {response.name}")
         skill_message = Message(
             role="system",
             content=f"Activated skill: {response.name}\n\n{expanded}",

@@ -65,6 +65,47 @@ def test_llm_planner_parses_valid_json_plan() -> None:
     assert model_client.messages[0].role == "system"
 
 
+def test_llm_planner_includes_skill_catalog_in_planning_prompt() -> None:
+    model_client = TextModelClient(
+        '{"tasks": [{"id": "task_1", "title": "Inspect", "description": "Inspect repo", "dependencies": []}]}'
+    )
+    planner = LLMPlanner(
+        model_client=model_client,
+        skill_catalog="- debug-bug: debug issues | when_to_use: when a page is broken",
+    )
+
+    planner.create_plan(user_input="fix page", history=())
+
+    assert "Available execution-time skills" in model_client.messages[0].content
+    assert "debug-bug: debug issues" in model_client.messages[0].content
+    assert "return only JSON" in model_client.messages[0].content
+
+
+def test_llm_planner_includes_skill_catalog_in_replanning_prompt() -> None:
+    model_client = TextModelClient(
+        '{"tasks": [{"id": "task_1", "title": "Done", "description": "Done", "status": "completed"}]}'
+    )
+    planner = LLMPlanner(
+        model_client=model_client,
+        skill_catalog="- debug-bug: debug issues | when_to_use: when a page is broken",
+    )
+    original = TaskPlan(
+        tasks=(Task(id="task_1", title="Done", description="Done", status="completed"),)
+    )
+
+    replanned = planner.replan_after_failure(
+        user_input="fix page",
+        history=(),
+        task_plan=original,
+        failed_task_id="task_1",
+        error="boom",
+    )
+
+    assert replanned.tasks[0] == original.tasks[0]
+    assert "Available execution-time skills" in model_client.messages[0].content
+    assert "debug-bug: debug issues" in model_client.messages[0].content
+
+
 @pytest.mark.parametrize(
     "content",
     [
