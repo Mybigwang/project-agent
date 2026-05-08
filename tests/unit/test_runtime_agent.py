@@ -53,7 +53,14 @@ class CapturingModelClient:
     def __init__(self) -> None:
         self.messages: tuple[Message, ...] = ()
 
-    def complete(self, *, messages: Sequence[Message], tools: Sequence[object]) -> Message:
+    def complete(
+        self,
+        *,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        stream_callback: object | None = None,
+    ) -> Message:
+        del stream_callback
         self.messages = tuple(messages)
         return Message(role="assistant", content="ok")
 
@@ -65,8 +72,13 @@ class ToolCallCapturingModelClient:
         self.calls: tuple[tuple[Message, ...], ...] = ()
 
     def complete(
-        self, *, messages: Sequence[Message], tools: Sequence[object]
+        self,
+        *,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        stream_callback: object | None = None,
     ) -> Message | tuple[ToolCall, ...]:
+        del tools, stream_callback
         self.calls = (*self.calls, tuple(messages))
         if len(self.calls) == 1:
             return (ToolCall(name="echo", arguments={"content": "ping"}, call_id="call_123"),)
@@ -80,8 +92,13 @@ class MultiToolCallCapturingModelClient:
         self.calls: tuple[tuple[Message, ...], ...] = ()
 
     def complete(
-        self, *, messages: Sequence[Message], tools: Sequence[object]
+        self,
+        *,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        stream_callback: object | None = None,
     ) -> Message | tuple[ToolCall, ...]:
+        del tools, stream_callback
         self.calls = (*self.calls, tuple(messages))
         if len(self.calls) == 1:
             return (
@@ -98,8 +115,13 @@ class MultiToolCallWithErrorModelClient:
         self.calls: tuple[tuple[Message, ...], ...] = ()
 
     def complete(
-        self, *, messages: Sequence[Message], tools: Sequence[object]
+        self,
+        *,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        stream_callback: object | None = None,
     ) -> Message | tuple[ToolCall, ...]:
+        del tools, stream_callback
         self.calls = (*self.calls, tuple(messages))
         if len(self.calls) == 1:
             return (
@@ -409,8 +431,13 @@ class AlwaysBoomModelClient:
     name = "always-boom-model"
 
     def complete(
-        self, *, messages: Sequence[Message], tools: Sequence[object]
+        self,
+        *,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        stream_callback: object | None = None,
     ) -> tuple[ToolCall, ...]:
+        del messages, tools, stream_callback
         return (ToolCall(name="boom", arguments={}, call_id="call_boom"),)
 
 
@@ -490,6 +517,7 @@ def test_agent_runtime_executes_planned_tasks_and_persists_task_plan(
     assert [task.status for task in result.task_plan.tasks] == ["completed", "completed"]  # type: ignore[union-attr]
     assert result.messages == (
         Message(role="user", content="hello"),
+        Message(role="assistant", content="ok"),
         Message(role="assistant", content="ok"),
     )
     assert store.load("session-1").task_plan == result.task_plan

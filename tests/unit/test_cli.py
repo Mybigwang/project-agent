@@ -41,6 +41,13 @@ def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "max_relevant_file_chars": 3000,
         "recent_commits_count": 5,
         "context_command_timeout_seconds": 5.0,
+        "skills_enabled": True,
+        "skills_builtin_enabled": True,
+        "project_skills_dir": tmp_path / ".project_agent" / "skills",
+        "user_skills_dir": None,
+        "skills_allow_command_substitution": False,
+        "skills_max_composition_depth": 3,
+        "skills_max_expansion_chars": 20000,
         **overrides,
     }
     return Settings(**values)
@@ -75,9 +82,7 @@ def test_run_command_executes_runtime(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert "Mock response (turn 1): hello" in result.stdout
-    assert "Tasks:" in result.stdout
-    assert "  - completed task_1: hello" in result.stdout
+    assert result.stdout == "Mock response (turn 1): hello\n"
 
 
 def test_run_command_prints_trace_output(tmp_path: Path) -> None:
@@ -88,9 +93,7 @@ def test_run_command_prints_trace_output(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "Tool result (turn 1): echo: ping" in result.stdout
-    assert "  - completed task_1: use tool ping" in result.stdout
-    assert "[step 1] task task_1 in_progress ok: started use tool ping" in result.stdout
-    assert "[step 2] tool echo ok: echo: ping" in result.stdout
+    assert "[step 1] tool echo ok: echo: ping" in result.stdout
 
 
 def test_run_command_streams_output_when_enabled(tmp_path: Path) -> None:
@@ -112,7 +115,14 @@ def test_run_command_streaming_preserves_whitespace(
     class WhitespaceModelClient:
         name = "whitespace-model"
 
-        def complete(self, *, messages: list[Message], tools: list[object]) -> Message:  # type: ignore[override]
+        def complete(
+            self,
+            *,
+            messages: list[Message],
+            tools: list[object],
+            stream_callback: object | None = None,
+        ) -> Message:
+            del messages, tools, stream_callback
             return Message(role="assistant", content="line 1\n\nline  2")
 
     monkeypatch.setattr(cli_module, "MockModelClient", WhitespaceModelClient)
@@ -123,7 +133,7 @@ def test_run_command_streaming_preserves_whitespace(
     )
 
     assert result.exit_code == 0
-    assert result.stdout == "line 1\n\nline  2\nTasks:\n  - completed task_1: hello\n"
+    assert result.stdout == "line 1\n\nline  2\n"
 
 
 def test_run_command_sanitizes_final_output(
@@ -133,7 +143,14 @@ def test_run_command_sanitizes_final_output(
     class ControlCharacterModelClient:
         name = "control-character-model"
 
-        def complete(self, *, messages: list[Message], tools: list[object]) -> Message:  # type: ignore[override]
+        def complete(
+            self,
+            *,
+            messages: list[Message],
+            tools: list[object],
+            stream_callback: object | None = None,
+        ) -> Message:
+            del messages, tools, stream_callback
             return Message(role="assistant", content="ok\x1b[31m\rnext")
 
     monkeypatch.setattr(cli_module, "MockModelClient", ControlCharacterModelClient)
@@ -158,7 +175,14 @@ def test_run_command_streams_saved_response_without_second_model_call(
         def __init__(self) -> None:
             self.complete_calls = 0
 
-        def complete(self, *, messages: list[Message], tools: list[object]) -> Message:  # type: ignore[override]
+        def complete(
+            self,
+            *,
+            messages: list[Message],
+            tools: list[object],
+            stream_callback: object | None = None,
+        ) -> Message:
+            del messages, tools, stream_callback
             self.complete_calls += 1
             return Message(role="assistant", content=f"response {self.complete_calls}")
 
@@ -176,7 +200,7 @@ def test_run_command_streams_saved_response_without_second_model_call(
     )
 
     assert result.exit_code == 0
-    assert result.stdout == "response 1\nTasks:\n  - completed task_1: hello\n"
+    assert result.stdout == "response 1\n"
     assert model_client.complete_calls == 1
 
 
@@ -290,6 +314,39 @@ def test_run_command_uses_session_history(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "Mock response (turn 2): hello again" in result.stdout
+
+
+def test_run_command_executes_project_skill_prompt(tmp_path: Path) -> None:
+    skill_path = tmp_path / ".project_agent" / "skills" / "demo" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True, exist_ok=True)
+    skill_path.write_text(
+        (
+            "---\n"
+            "name: demo\n"
+            "description: demo skill\n"
+            "---\n"
+            "Expanded {{args[0]}}"
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["--workspace-root", str(tmp_path), "run", "--prompt", "/demo hello"],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == "Mock response (turn 1): Skill: demo\n\nExpanded hello\n"
+
+
+def test_run_command_reports_unknown_skill_command(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["--workspace-root", str(tmp_path), "run", "--prompt", "/missing"],
+    )
+
+    assert result.exit_code == 0
+    assert "Unknown command: /missing" in result.stdout
 
 
 def test_run_command_supports_interactive_mode(tmp_path: Path) -> None:

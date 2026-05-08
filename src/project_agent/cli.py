@@ -18,6 +18,13 @@ from project_agent.runtime.model_clients import MockModelClient, OpenAICompatibl
 from project_agent.runtime.planner import LLMPlanner
 from project_agent.runtime.session_store import FileSessionStore
 from project_agent.runtime.tools import EchoTool, build_default_tools
+from project_agent.skills import (
+    SkillPromptPreprocessor,
+    SkillRegistry,
+    SkillRuntimeSettings,
+    build_skill_invocation,
+    load_skills,
+)
 
 CONFIG_OPTION = typer.Option(
     None,
@@ -105,6 +112,16 @@ def run(
         recent_commits_count=settings.recent_commits_count,
         context_command_timeout_seconds=settings.context_command_timeout_seconds,
     )
+    skill_registry = _build_skill_registry(settings)
+    skill_preprocessor = SkillPromptPreprocessor(
+        registry=skill_registry,
+        workspace_root=settings.workspace_root,
+        max_composition_depth=settings.skills_max_composition_depth,
+        max_expansion_chars=settings.skills_max_expansion_chars,
+        runtime_settings=SkillRuntimeSettings(
+            allow_command_substitution=settings.skills_allow_command_substitution
+        ),
+    )
     active_session_id = session_id or uuid4().hex
     active_max_steps = max_steps or settings.max_steps
     should_stream = settings.stream_output if stream is None else stream
@@ -123,6 +140,8 @@ def run(
             max_steps=active_max_steps,
             repository_context_builder=repository_context_builder,
             enable_repository_context=settings.enable_repository_context,
+            skill_registry=skill_registry,
+            skill_preprocessor=skill_preprocessor,
         )
         return
 
@@ -144,6 +163,8 @@ def run(
             max_steps=active_max_steps,
             repository_context_builder=repository_context_builder,
             enable_repository_context=settings.enable_repository_context,
+            skill_registry=skill_registry,
+            skill_preprocessor=skill_preprocessor,
         )
 
 
@@ -169,25 +190,32 @@ def _run_once(
     max_steps: int,
     repository_context_builder: RepositoryContextBuilderProtocol,
     enable_repository_context: bool,
+    skill_registry: SkillRegistry,
+    skill_preprocessor: SkillPromptPreprocessor,
 ) -> None:
     import sys
-    
+
+    streamed_output: list[str] = []
+
     def stream_callback(char: str) -> None:
+        streamed_output.append(char)
         sys.stdout.write(char)
         sys.stdout.flush()
 
     cmd, actual_input = _parse_command(user_input)
-    
+
     planner = None
     if cmd == "/plan":
         planner = LLMPlanner(model_client=model_client)
     elif cmd is not None:
-        typer.echo(f"Unknown command: {cmd}")
-        return
+        skill = skill_registry.get(cmd.removeprefix("/"))
+        if skill is None or not skill.metadata.user_invocable:
+            typer.echo(f"Unknown command: {cmd}")
+            return
+        actual_input = skill_preprocessor.expand_invocation(
+            build_skill_invocation(command_name=cmd, raw_args=actual_input)
+        )
 
-    # If the user only types /plan with no arguments, we might still pass it,
-    # but actual_input will be empty. The model will handle it.
-    
     result = runtime.run_turn(
         session_id=session_id,
         user_input=actual_input,
@@ -202,6 +230,8 @@ def _run_once(
         stream_callback=stream_callback if stream_output else None,
     )
     if stream_output:
+        if not streamed_output and result.final_message.content:
+            sys.stdout.write(_sanitize_final_output(result.final_message.content))
         sys.stdout.write("\n")
         sys.stdout.flush()
     else:
@@ -259,6 +289,16 @@ def _build_model_client(settings: Settings) -> ModelClient:
         api_key=settings.model_api_key,
         model=settings.default_model,
     )
+
+
+def _build_skill_registry(settings: Settings) -> SkillRegistry:
+    builtin_root = None
+    if settings.skills_enabled and settings.skills_builtin_enabled:
+        builtin_root = Path(__file__).resolve().parent / "skills" / "builtin"
+    project_root = settings.project_skills_dir if settings.skills_enabled else None
+    user_root = settings.user_skills_dir if settings.skills_enabled else None
+    skills = load_skills(builtin_root=builtin_root, user_root=user_root, project_root=project_root)
+    return SkillRegistry(skills)
 
 
 def _require_settings(obj: object) -> Settings:

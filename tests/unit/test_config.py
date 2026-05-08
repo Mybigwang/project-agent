@@ -26,6 +26,13 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PROJECT_AGENT_MAX_RELEVANT_FILE_CHARS", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_RECENT_COMMITS_COUNT", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_CONTEXT_COMMAND_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_SKILLS_ENABLED", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_SKILLS_BUILTIN_ENABLED", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_PROJECT_SKILLS_DIR", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_USER_SKILLS_DIR", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_SKILLS_ALLOW_COMMAND_SUBSTITUTION", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_SKILLS_MAX_COMPOSITION_DEPTH", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_SKILLS_MAX_EXPANSION_CHARS", raising=False)
 
     settings = load_settings()
 
@@ -47,6 +54,13 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.max_relevant_file_chars == 3000
     assert settings.recent_commits_count == 5
     assert settings.context_command_timeout_seconds == 5.0
+    assert settings.skills_enabled is True
+    assert settings.skills_builtin_enabled is True
+    assert settings.project_skills_dir == (settings.workspace_root / ".project_agent" / "skills").resolve()
+    assert settings.user_skills_dir is None
+    assert settings.skills_allow_command_substitution is False
+    assert settings.skills_max_composition_depth == 3
+    assert settings.skills_max_expansion_chars == 20000
 
 
 def test_load_settings_honors_override_precedence(
@@ -245,6 +259,8 @@ def test_load_settings_honors_phase3_override_precedence(
         ("max_relevant_file_chars = 0\n", "max_relevant_file_chars must be >= 1"),
         ("recent_commits_count = 0\n", "recent_commits_count must be >= 1"),
         ("context_command_timeout_seconds = 0\n", "context_command_timeout_seconds must be > 0"),
+        ("skills_max_composition_depth = 0\n", "skills_max_composition_depth must be >= 1"),
+        ("skills_max_expansion_chars = 0\n", "skills_max_expansion_chars must be >= 1"),
     ],
 )
 def test_load_settings_raises_on_non_positive_phase3_limits(
@@ -260,3 +276,51 @@ def test_load_settings_raises_on_non_positive_phase3_limits(
 
     with pytest.raises(ConfigurationError, match=error_message):
         load_settings(config_path=config_path)
+
+
+def test_load_settings_supports_skill_specific_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        (
+            "[project_agent]\n"
+            "skills_enabled = false\n"
+            "skills_builtin_enabled = false\n"
+            "project_skills_dir = 'from-config-project'\n"
+            "user_skills_dir = 'from-config-user'\n"
+            "skills_allow_command_substitution = true\n"
+            "skills_max_composition_depth = 9\n"
+            "skills_max_expansion_chars = 999\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROJECT_AGENT_SKILLS_ENABLED", "true")
+    monkeypatch.setenv("PROJECT_AGENT_SKILLS_BUILTIN_ENABLED", "true")
+    monkeypatch.setenv("PROJECT_AGENT_PROJECT_SKILLS_DIR", str(tmp_path / "from-env-project"))
+    monkeypatch.setenv("PROJECT_AGENT_USER_SKILLS_DIR", str(tmp_path / "from-env-user"))
+    monkeypatch.setenv("PROJECT_AGENT_SKILLS_ALLOW_COMMAND_SUBSTITUTION", "false")
+    monkeypatch.setenv("PROJECT_AGENT_SKILLS_MAX_COMPOSITION_DEPTH", "10")
+    monkeypatch.setenv("PROJECT_AGENT_SKILLS_MAX_EXPANSION_CHARS", "1000")
+
+    settings = load_settings(
+        config_path=config_path,
+        overrides={
+            "skills_enabled": "false",
+            "skills_builtin_enabled": "false",
+            "project_skills_dir": str(tmp_path / "from-cli-project"),
+            "user_skills_dir": str(tmp_path / "from-cli-user"),
+            "skills_allow_command_substitution": "true",
+            "skills_max_composition_depth": "11",
+            "skills_max_expansion_chars": "1111",
+        },
+    )
+
+    assert settings.skills_enabled is False
+    assert settings.skills_builtin_enabled is False
+    assert settings.project_skills_dir == (tmp_path / "from-cli-project").resolve()
+    assert settings.user_skills_dir == (tmp_path / "from-cli-user").resolve()
+    assert settings.skills_allow_command_substitution is True
+    assert settings.skills_max_composition_depth == 11
+    assert settings.skills_max_expansion_chars == 1111

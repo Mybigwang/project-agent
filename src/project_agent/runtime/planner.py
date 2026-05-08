@@ -52,7 +52,7 @@ class LLMPlanner:
     def __init__(self, *, model_client: ModelClient) -> None:
         self._model_client = model_client
 
-    def create_plan(self, *, user_input: str, history: tuple[Message, ...]) -> TaskPlan:
+    def create_plan(self, *, user_input: str, history: Sequence[Message]) -> TaskPlan:
         messages = _build_planning_messages(user_input=user_input, history=history)
         response = self._model_client.complete(messages=messages, tools=())
         if not isinstance(response, Message):

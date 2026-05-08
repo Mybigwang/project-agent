@@ -33,6 +33,13 @@ class Settings:
     max_relevant_file_chars: int
     recent_commits_count: int
     context_command_timeout_seconds: float
+    skills_enabled: bool
+    skills_builtin_enabled: bool
+    project_skills_dir: Path | None
+    user_skills_dir: Path | None
+    skills_allow_command_substitution: bool
+    skills_max_composition_depth: int
+    skills_max_expansion_chars: int
 
 
 def load_settings(
@@ -188,6 +195,67 @@ def load_settings(
             ),
         )
     )
+    skills_enabled = _parse_bool(
+        override_values.get(
+            "skills_enabled",
+            os.getenv("PROJECT_AGENT_SKILLS_ENABLED", config_values.get("skills_enabled", "true")),
+        )
+    )
+    skills_builtin_enabled = _parse_bool(
+        override_values.get(
+            "skills_builtin_enabled",
+            os.getenv(
+                "PROJECT_AGENT_SKILLS_BUILTIN_ENABLED",
+                config_values.get("skills_builtin_enabled", "true"),
+            ),
+        )
+    )
+    project_skills_dir = _parse_optional_path(
+        override_values.get(
+            "project_skills_dir",
+            os.getenv(
+                "PROJECT_AGENT_PROJECT_SKILLS_DIR",
+                config_values.get(
+                    "project_skills_dir", str(workspace_root / ".project_agent" / "skills")
+                ),
+            ),
+        ),
+        workspace_root=workspace_root,
+    )
+    user_skills_dir = _parse_optional_path(
+        override_values.get(
+            "user_skills_dir",
+            os.getenv("PROJECT_AGENT_USER_SKILLS_DIR", config_values.get("user_skills_dir", "")),
+        ),
+        workspace_root=workspace_root,
+    )
+    skills_allow_command_substitution = _parse_bool(
+        override_values.get(
+            "skills_allow_command_substitution",
+            os.getenv(
+                "PROJECT_AGENT_SKILLS_ALLOW_COMMAND_SUBSTITUTION",
+                config_values.get("skills_allow_command_substitution", "false"),
+            ),
+        )
+    )
+    skills_max_composition_depth = int(
+        override_values.get(
+            "skills_max_composition_depth",
+            os.getenv(
+                "PROJECT_AGENT_SKILLS_MAX_COMPOSITION_DEPTH",
+                config_values.get("skills_max_composition_depth", "3"),
+            ),
+        )
+    )
+    skills_max_expansion_chars = int(
+        override_values.get(
+            "skills_max_expansion_chars",
+            os.getenv(
+                "PROJECT_AGENT_SKILLS_MAX_EXPANSION_CHARS",
+                config_values.get("skills_max_expansion_chars", "20000"),
+            ),
+        )
+    )
 
     _validate_log_level(log_level)
     _validate_max_steps(max_steps)
@@ -201,6 +269,8 @@ def load_settings(
     _validate_positive_int(max_relevant_file_chars, "max_relevant_file_chars")
     _validate_positive_int(recent_commits_count, "recent_commits_count")
     _validate_positive_number(context_command_timeout_seconds, "context_command_timeout_seconds")
+    _validate_positive_int(skills_max_composition_depth, "skills_max_composition_depth")
+    _validate_positive_int(skills_max_expansion_chars, "skills_max_expansion_chars")
 
     return Settings(
         workspace_root=workspace_root,
@@ -223,6 +293,13 @@ def load_settings(
         max_relevant_file_chars=max_relevant_file_chars,
         recent_commits_count=recent_commits_count,
         context_command_timeout_seconds=context_command_timeout_seconds,
+        skills_enabled=skills_enabled,
+        skills_builtin_enabled=skills_builtin_enabled,
+        project_skills_dir=project_skills_dir,
+        user_skills_dir=user_skills_dir,
+        skills_allow_command_substitution=skills_allow_command_substitution,
+        skills_max_composition_depth=skills_max_composition_depth,
+        skills_max_expansion_chars=skills_max_expansion_chars,
     )
 
 
@@ -254,6 +331,16 @@ def _parse_bool(value: str) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ConfigurationError(f"invalid boolean value: {value}")
+
+
+def _parse_optional_path(value: str, *, workspace_root: Path) -> Path | None:
+    normalized = value.strip()
+    if not normalized:
+        return None
+    path = Path(normalized)
+    if not path.is_absolute():
+        path = workspace_root / path
+    return path.resolve()
 
 
 def _validate_log_level(log_level: str) -> None:

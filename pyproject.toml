@@ -30,7 +30,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-project_agent = ["py.typed"]
+project_agent = ["py.typed", "skills/builtin/*/SKILL.md"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
