@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from project_agent.core.types import ToolCall, ToolResult
+from project_agent.runtime.permissions import ToolPermissionCategory
 from project_agent.runtime.tool_registry import ToolRegistry
 
 
@@ -13,6 +14,7 @@ class EchoTool:
     description = "Echo back content"
     input_schema = {"type": "object"}
     is_read_only = True
+    permission_category = ToolPermissionCategory.READ
 
     def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult:
         return ToolResult(
@@ -31,6 +33,7 @@ class FlakyReadTool:
     description = "Read file after transient failure"
     input_schema = {"type": "object"}
     is_read_only = True
+    permission_category = ToolPermissionCategory.READ
 
     def __init__(self) -> None:
         self.calls = 0
@@ -47,6 +50,7 @@ class MutatingTool:
     description = "Never retry mutating tool"
     input_schema = {"type": "object"}
     is_read_only = False
+    permission_category = ToolPermissionCategory.WRITE
 
     def __init__(self) -> None:
         self.calls = 0

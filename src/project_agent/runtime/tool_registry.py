@@ -21,6 +21,9 @@ class ToolRegistry:
     def tools(self) -> tuple[Tool, ...]:
         return self._tools
 
+    def get_tool(self, name: str) -> Tool | None:
+        return self._tools_by_name.get(name)
+
     def invoke(self, *, tool_call: ToolCall, workspace_root: Path) -> ToolResult:
         tool = self._tools_by_name.get(tool_call.name)
         if tool is None:

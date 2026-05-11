@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from project_agent.errors import ConfigurationError
+from project_agent.runtime.permissions import PermissionMode
 
 VALID_LOG_LEVELS = frozenset({"critical", "error", "warning", "info", "debug"})
 
@@ -40,6 +41,8 @@ class Settings:
     skills_allow_command_substitution: bool
     skills_max_composition_depth: int
     skills_max_expansion_chars: int
+    permission_mode: PermissionMode
+    permission_rules_file: Path | None
 
 
 def load_settings(
@@ -256,6 +259,19 @@ def load_settings(
             ),
         )
     )
+    permission_mode = _parse_permission_mode(
+        override_values.get(
+            "permission_mode",
+            os.getenv("PROJECT_AGENT_PERMISSION_MODE", config_values.get("permission_mode", "default")),
+        )
+    )
+    permission_rules_file = _parse_optional_path(
+        override_values.get(
+            "permission_rules_file",
+            os.getenv("PROJECT_AGENT_PERMISSION_RULES_FILE", config_values.get("permission_rules_file", "")),
+        ),
+        workspace_root=workspace_root,
+    )
 
     _validate_log_level(log_level)
     _validate_max_steps(max_steps)
@@ -300,6 +316,8 @@ def load_settings(
         skills_allow_command_substitution=skills_allow_command_substitution,
         skills_max_composition_depth=skills_max_composition_depth,
         skills_max_expansion_chars=skills_max_expansion_chars,
+        permission_mode=permission_mode,
+        permission_rules_file=permission_rules_file,
     )
 
 
@@ -341,6 +359,13 @@ def _parse_optional_path(value: str, *, workspace_root: Path) -> Path | None:
     if not path.is_absolute():
         path = workspace_root / path
     return path.resolve()
+
+
+def _parse_permission_mode(value: str) -> PermissionMode:
+    try:
+        return PermissionMode(value.strip().lower())
+    except ValueError as error:
+        raise ConfigurationError(f"invalid permission mode: {value}") from error
 
 
 def _validate_log_level(log_level: str) -> None:

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from project_agent.core.interfaces import Tool
 from project_agent.core.types import ToolResult
+from project_agent.runtime.permissions.types import ToolPermissionCategory
 from project_agent.runtime.local_tools import RunCommandTool
 from project_agent.runtime.local_tools.filesystem import (
     EditFileTool,
@@ -22,6 +23,7 @@ class EchoTool:
         "properties": {"content": {"type": "string"}},
     }
     is_read_only = True
+    permission_category = ToolPermissionCategory.READ
 
     def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult:
         return ToolResult(name=self.name, content=f"echo: {arguments.get('content', '')}")

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from project_agent.core.types import ToolResult
+from project_agent.runtime.permissions.types import ToolPermissionCategory
 from project_agent.errors import ToolExecutionError
 from project_agent.runtime.workspace import relative_workspace_path, resolve_workspace_path
 
@@ -20,6 +21,7 @@ class SearchCodeTool:
         "required": ["pattern"],
     }
     is_read_only = True
+    permission_category = ToolPermissionCategory.SEARCH
 
     def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult:
         pattern = arguments.get("pattern")

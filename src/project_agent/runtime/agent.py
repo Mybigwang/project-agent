@@ -24,12 +24,14 @@ from project_agent.core.types import (
 )
 from project_agent.errors import AgentError, RuntimeLimitError
 from project_agent.runtime.model_clients import MAX_TOOL_CALLS_PER_RESPONSE
+from project_agent.runtime.permissions import PermissionDecision, PermissionPolicy, PermissionRequest
 from project_agent.runtime.tool_registry import ToolRegistry
 from project_agent.skills import SkillPromptPreprocessor, SkillRegistry, build_skill_invocation
 from project_agent.skills.errors import SkillError
 
 MAX_SKILL_CALLS_PER_TURN = 1
 NotificationCallback = Callable[[str], None]
+ApprovalCallback = Callable[[str], bool]
 
 
 class AgentRuntime:
@@ -50,6 +52,8 @@ class AgentRuntime:
         notification_callback: NotificationCallback | None = None,
         skill_registry: SkillRegistry | None = None,
         skill_preprocessor: SkillPromptPreprocessor | None = None,
+        permission_policy: PermissionPolicy | None = None,
+        approval_callback: ApprovalCallback | None = None,
     ) -> RunResult:
         state = session_store.load(session_id)
         history = state.messages
@@ -72,6 +76,8 @@ class AgentRuntime:
                 notification_callback=notification_callback,
                 skill_registry=skill_registry,
                 skill_preprocessor=skill_preprocessor,
+                permission_policy=permission_policy,
+                approval_callback=approval_callback,
             )
 
         task_plan = self._select_task_plan(
@@ -117,6 +123,8 @@ class AgentRuntime:
                 notification_callback=notification_callback,
                 skill_registry=skill_registry,
                 skill_preprocessor=skill_preprocessor,
+                permission_policy=permission_policy,
+                approval_callback=approval_callback,
             )
             messages = task_result.messages
             trace = trace + task_result.trace
@@ -222,6 +230,8 @@ class AgentRuntime:
         notification_callback: NotificationCallback | None,
         skill_registry: SkillRegistry | None,
         skill_preprocessor: SkillPromptPreprocessor | None,
+        permission_policy: PermissionPolicy | None,
+        approval_callback: ApprovalCallback | None,
     ) -> RunResult:
         model_messages = self._build_model_messages(
             history=history,
@@ -262,6 +272,8 @@ class AgentRuntime:
                     skill_registry=skill_registry,
                     skill_preprocessor=skill_preprocessor,
                     notification_callback=notification_callback,
+                    permission_policy=permission_policy,
+                    approval_callback=approval_callback,
                 )
                 skill_calls_used += 1
                 continue
@@ -270,6 +282,8 @@ class AgentRuntime:
                 response=response,
                 registry=registry,
                 workspace_root=workspace_root,
+                permission_policy=permission_policy,
+                approval_callback=approval_callback,
             )
             assistant_tool_message = Message(
                 role="assistant", content="", tool_calls=executed_tool_calls
@@ -283,6 +297,16 @@ class AgentRuntime:
                     summary=tool_result.content,
                     tool_name=tool_result.name,
                     is_error=tool_result.is_error,
+                    permission_decision=(
+                        str(tool_result.data.get("decision"))
+                        if tool_result.data is not None and "decision" in tool_result.data
+                        else None
+                    ),
+                    reason_code=(
+                        str(tool_result.data.get("reason_code"))
+                        if tool_result.data is not None and "reason_code" in tool_result.data
+                        else None
+                    ),
                 )
                 for tool_result in tool_results
             )
@@ -317,6 +341,8 @@ class AgentRuntime:
         notification_callback: NotificationCallback | None,
         skill_registry: SkillRegistry | None,
         skill_preprocessor: SkillPromptPreprocessor | None,
+        permission_policy: PermissionPolicy | None,
+        approval_callback: ApprovalCallback | None,
     ) -> _TaskRunResult:
         model_messages = self._build_model_messages(
             history=history,
@@ -369,6 +395,8 @@ class AgentRuntime:
                     skill_registry=skill_registry,
                     skill_preprocessor=skill_preprocessor,
                     notification_callback=notification_callback,
+                    permission_policy=permission_policy,
+                    approval_callback=approval_callback,
                     task_id=task.id,
                 )
                 step += 1
@@ -380,6 +408,8 @@ class AgentRuntime:
                 response=response,
                 registry=registry,
                 workspace_root=workspace_root,
+                permission_policy=permission_policy,
+                approval_callback=approval_callback,
             )
             assistant_tool_message = Message(
                 role="assistant", content="", tool_calls=executed_tool_calls
@@ -394,6 +424,16 @@ class AgentRuntime:
                     tool_name=tool_result.name,
                     is_error=tool_result.is_error,
                     task_id=task.id,
+                    permission_decision=(
+                        str(tool_result.data.get("decision"))
+                        if tool_result.data is not None and "decision" in tool_result.data
+                        else None
+                    ),
+                    reason_code=(
+                        str(tool_result.data.get("reason_code"))
+                        if tool_result.data is not None and "reason_code" in tool_result.data
+                        else None
+                    ),
                 )
                 for tool_result in tool_results
             )
@@ -467,12 +507,16 @@ class AgentRuntime:
         skill_registry: SkillRegistry | None,
         skill_preprocessor: SkillPromptPreprocessor | None,
         notification_callback: NotificationCallback | None,
+        permission_policy: PermissionPolicy | None,
+        approval_callback: ApprovalCallback | None,
         task_id: str | None = None,
     ) -> tuple[tuple[Message, ...], tuple[Message, ...], tuple[AgentTraceStep, ...]]:
         if skill_calls_used >= MAX_SKILL_CALLS_PER_TURN:
             raise AgentError("model selected too many skills in one turn")
         if skill_registry is None or skill_preprocessor is None:
             raise AgentError("model selected a skill but skills are not configured")
+        if permission_policy is not None and permission_policy.mode.value == "plan":
+            raise AgentError("model selected a skill that is not allowed in plan mode")
         skill = skill_registry.get(response.name)
         if skill is None:
             raise AgentError(f"model selected unknown skill: {response.name}")
@@ -507,6 +551,8 @@ class AgentRuntime:
         response: tuple[ToolCall, ...],
         registry: ToolRegistry,
         workspace_root: Path,
+        permission_policy: PermissionPolicy | None,
+        approval_callback: ApprovalCallback | None,
     ) -> tuple[tuple[ToolCall, ...], tuple[ToolResult, ...], tuple[Message, ...]]:
         self._validate_tool_call_batch(response)
         executed_tool_calls: tuple[ToolCall, ...] = ()
@@ -517,6 +563,8 @@ class AgentRuntime:
                 tool_call=tool_call,
                 registry=registry,
                 workspace_root=workspace_root,
+                permission_policy=permission_policy,
+                approval_callback=approval_callback,
             )
             executed_tool_calls = (*executed_tool_calls, tool_call)
             tool_results = (*tool_results, tool_result)
@@ -538,8 +586,54 @@ class AgentRuntime:
         tool_call: ToolCall,
         registry: ToolRegistry,
         workspace_root: Path,
+        permission_policy: PermissionPolicy | None,
+        approval_callback: ApprovalCallback | None,
     ) -> ToolResult:
-        return registry.invoke(tool_call=tool_call, workspace_root=workspace_root)
+        tool = registry.get_tool(tool_call.name)
+        if tool is None:
+            return registry.invoke(tool_call=tool_call, workspace_root=workspace_root)
+        if permission_policy is None:
+            return registry.invoke(tool_call=tool_call, workspace_root=workspace_root)
+
+        outcome = permission_policy.evaluate(
+            PermissionRequest(
+                tool_name=tool.name,
+                tool_category=tool.permission_category,
+                arguments=tool_call.arguments,
+                workspace_root=workspace_root,
+                is_read_only=tool.is_read_only,
+            )
+        )
+        if outcome.decision == PermissionDecision.ALLOW:
+            return registry.invoke(tool_call=tool_call, workspace_root=workspace_root)
+        if outcome.decision == PermissionDecision.ASK:
+            if approval_callback is None:
+                return ToolResult(
+                    name=tool.name,
+                    content=outcome.reason,
+                    is_error=True,
+                    error_code="permission_required",
+                    data={
+                        "decision": outcome.decision.value,
+                        "reason_code": outcome.reason_code,
+                        "matched_rule": outcome.matched_rule,
+                    },
+                )
+            approved = approval_callback(f"{tool.name}: {outcome.reason}")
+            if approved:
+                return registry.invoke(tool_call=tool_call, workspace_root=workspace_root)
+
+        return ToolResult(
+            name=tool.name,
+            content=outcome.reason,
+            is_error=True,
+            error_code="permission_denied",
+            data={
+                "decision": outcome.decision.value,
+                "reason_code": outcome.reason_code,
+                "matched_rule": outcome.matched_rule,
+            },
+        )
 
     def _format_tool_message(self, tool_result: ToolResult) -> str:
         return tool_result.to_message_content()

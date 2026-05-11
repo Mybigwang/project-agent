@@ -3,6 +3,7 @@ from pathlib import Path
 
 from project_agent.core.interfaces import ModelClient, Plugin, SessionStore, Tool
 from project_agent.core.types import Message, SessionState, ToolCall, ToolResult
+from project_agent.runtime.permissions import ToolPermissionCategory
 
 
 class ExamplePlugin:
@@ -17,6 +18,7 @@ class ExampleTool:
     description = "Echo back content"
     input_schema = {"type": "object"}
     is_read_only = True
+    permission_category = ToolPermissionCategory.READ
 
     def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult:
         return ToolResult(name=self.name, content=str(arguments.get("content", "")))

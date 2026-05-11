@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from project_agent.config import load_settings
+from project_agent.runtime.permissions import PermissionMode
 from project_agent.errors import ConfigurationError
 
 
@@ -61,6 +62,8 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.skills_allow_command_substitution is False
     assert settings.skills_max_composition_depth == 3
     assert settings.skills_max_expansion_chars == 20000
+    assert settings.permission_mode == PermissionMode.DEFAULT
+    assert settings.permission_rules_file is None
 
 
 def test_load_settings_honors_override_precedence(
@@ -324,3 +327,46 @@ def test_load_settings_supports_skill_specific_overrides(
     assert settings.skills_allow_command_substitution is True
     assert settings.skills_max_composition_depth == 11
     assert settings.skills_max_expansion_chars == 1111
+
+
+def test_load_settings_supports_permission_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[project_agent]\npermission_mode = 'accept_edits'\npermission_rules_file = 'rules.toml'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROJECT_AGENT_PERMISSION_MODE", "dont_ask")
+    monkeypatch.setenv("PROJECT_AGENT_PERMISSION_RULES_FILE", str(tmp_path / "env-rules.toml"))
+
+    settings = load_settings(
+        config_path=config_path,
+        overrides={
+            "permission_mode": "plan",
+            "permission_rules_file": str(tmp_path / "cli-rules.toml"),
+        },
+    )
+
+    assert settings.permission_mode == PermissionMode.PLAN
+    assert settings.permission_rules_file == (tmp_path / "cli-rules.toml").resolve()
+
+
+def test_load_settings_rejects_invalid_permission_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[project_agent]\npermission_mode = 'invalid'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="invalid permission mode"):
+        load_settings(config_path=config_path)
+
+
+def test_load_settings_rejects_removed_auto_permission_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[project_agent]\npermission_mode = 'auto'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="invalid permission mode"):
+        load_settings(config_path=config_path)

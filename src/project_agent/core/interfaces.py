@@ -13,6 +13,7 @@ from project_agent.core.types import (
     ToolCall,
     ToolResult,
 )
+from project_agent.runtime.permissions.types import ToolPermissionCategory
 
 
 class Plugin(Protocol):
@@ -26,6 +27,7 @@ class Tool(Protocol):
     description: str
     input_schema: dict[str, Any]
     is_read_only: bool
+    permission_category: ToolPermissionCategory
 
     def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult: ...
 

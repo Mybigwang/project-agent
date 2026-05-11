@@ -18,7 +18,9 @@ from project_agent.core.types import (
 from project_agent.errors import AgentError
 from project_agent.runtime.agent import AgentRuntime
 from project_agent.runtime.model_clients import MockModelClient
+from project_agent.runtime.permissions import PermissionMode, PermissionPolicy, ToolPermissionCategory
 from project_agent.runtime.session_store import InMemorySessionStore
+from project_agent.runtime.tool_registry import ToolRegistry
 from project_agent.runtime.tools import EchoTool
 from project_agent.skills import SkillPromptPreprocessor, SkillRegistry, SkillRuntimeSettings, load_skills
 
@@ -28,6 +30,7 @@ class BoomTool:
     description = "Raise an error"
     input_schema = {"type": "object"}
     is_read_only = False
+    permission_category = ToolPermissionCategory.WRITE
 
     def run(self, *, workspace_root: Path, arguments: dict[str, object]):  # type: ignore[no-untyped-def]
         raise RuntimeError("boom")
@@ -38,6 +41,7 @@ class SideEffectTool:
     description = "Record side effects"
     input_schema = {"type": "object"}
     is_read_only = False
+    permission_category = ToolPermissionCategory.WRITE
 
     def __init__(self) -> None:
         self.calls: tuple[str, ...] = ()
@@ -867,6 +871,48 @@ def test_agent_runtime_rejects_repeated_skill_selection_in_one_turn(
             skill_registry=registry,
             skill_preprocessor=preprocessor,
         )
+
+
+def test_agent_runtime_denies_tool_call_when_permission_policy_blocks_it(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    result = runtime._run_tool_call(
+        tool_call=ToolCall(name="side_effect", arguments={"content": "x"}, call_id="call_1"),
+        registry=cli_tool_registry([SideEffectTool()]),
+        workspace_root=tmp_path,
+        permission_policy=PermissionPolicy(mode=PermissionMode.DONT_ASK),
+        approval_callback=None,
+    )
+
+    assert result.is_error is True
+    assert result.error_code == "permission_denied"
+    assert result.data is not None
+    assert result.data["reason_code"] is not None
+
+
+def test_agent_runtime_requires_approval_without_callback_for_write_tool(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    result = runtime._run_tool_call(
+        tool_call=ToolCall(name="side_effect", arguments={"content": "x"}, call_id="call_1"),
+        registry=cli_tool_registry([SideEffectTool()]),
+        workspace_root=tmp_path,
+        permission_policy=PermissionPolicy(mode=PermissionMode.DEFAULT),
+        approval_callback=None,
+    )
+
+    assert result.is_error is True
+    assert result.error_code == "permission_required"
+    assert result.data is not None
+    assert result.data["reason_code"] == "permission_write_requires_approval"
+
+
+def cli_tool_registry(tools: list[object]) -> ToolRegistry:
+    return ToolRegistry(tools)  # type: ignore[arg-type]
 
 
 def _make_preprocessor(

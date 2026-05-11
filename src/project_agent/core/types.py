@@ -123,6 +123,8 @@ class AgentTraceStep:
     is_error: bool = False
     task_id: str | None = None
     task_status: TaskStatus | None = None
+    permission_decision: str | None = None
+    reason_code: str | None = None
 
 
 @dataclass(frozen=True)

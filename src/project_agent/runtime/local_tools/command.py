@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from project_agent.core.types import ToolResult
+from project_agent.runtime.permissions.types import ToolPermissionCategory
 
 
 class RunCommandTool:
@@ -17,6 +18,7 @@ class RunCommandTool:
         "required": ["argv"],
     }
     is_read_only = False
+    permission_category = ToolPermissionCategory.EXECUTE
 
     def __init__(self, *, timeout_seconds: float, max_output_chars: int) -> None:
         self._timeout_seconds = timeout_seconds

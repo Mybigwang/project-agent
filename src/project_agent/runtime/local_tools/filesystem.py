@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from project_agent.core.types import ToolResult
+from project_agent.runtime.permissions.types import ToolPermissionCategory
 from project_agent.errors import ToolExecutionError
 from project_agent.runtime.workspace import relative_workspace_path, resolve_workspace_path
 
@@ -20,6 +21,7 @@ class ReadFileTool:
         "required": ["path"],
     }
     is_read_only = True
+    permission_category = ToolPermissionCategory.READ
 
     def __init__(self, *, max_chars: int) -> None:
         self._max_chars = max_chars
@@ -116,6 +118,7 @@ class WriteFileTool:
         "required": ["path", "content"],
     }
     is_read_only = False
+    permission_category = ToolPermissionCategory.WRITE
 
     def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult:
         path_argument = arguments.get("path")
@@ -175,6 +178,7 @@ class EditFileTool:
         "required": ["path", "old_text", "new_text"],
     }
     is_read_only = False
+    permission_category = ToolPermissionCategory.WRITE
 
     def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult:
         path_argument = arguments.get("path")
@@ -275,6 +279,7 @@ class ListFilesTool:
         },
     }
     is_read_only = True
+    permission_category = ToolPermissionCategory.READ
 
     def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult:
         path_argument = arguments.get("path", ".")

@@ -15,6 +15,9 @@ from project_agent.logging import configure_logging
 from project_agent.runtime.agent import AgentRuntime
 from project_agent.runtime.context import RepositoryContextBuilder
 from project_agent.runtime.model_clients import MockModelClient, OpenAICompatibleModelClient
+from project_agent.runtime.permissions import PermissionPolicy
+from project_agent.runtime.permissions.policy import load_permission_rules
+from project_agent.runtime.permissions.types import PermissionRule
 from project_agent.runtime.planner import LLMPlanner
 from project_agent.runtime.session_store import FileSessionStore
 from project_agent.runtime.tools import EchoTool, build_default_tools
@@ -113,6 +116,7 @@ def run(
         context_command_timeout_seconds=settings.context_command_timeout_seconds,
     )
     skill_registry = _build_skill_registry(settings)
+    permission_policy = _build_permission_policy(settings)
     skill_preprocessor = SkillPromptPreprocessor(
         registry=skill_registry,
         workspace_root=settings.workspace_root,
@@ -142,6 +146,8 @@ def run(
             enable_repository_context=settings.enable_repository_context,
             skill_registry=skill_registry,
             skill_preprocessor=skill_preprocessor,
+            permission_policy=permission_policy,
+            interactive_approval=False,
         )
         return
 
@@ -165,6 +171,8 @@ def run(
             enable_repository_context=settings.enable_repository_context,
             skill_registry=skill_registry,
             skill_preprocessor=skill_preprocessor,
+            permission_policy=permission_policy,
+            interactive_approval=True,
         )
 
 
@@ -203,6 +211,8 @@ def _run_once(
     enable_repository_context: bool,
     skill_registry: SkillRegistry,
     skill_preprocessor: SkillPromptPreprocessor,
+    permission_policy: PermissionPolicy,
+    interactive_approval: bool,
 ) -> None:
     import sys
 
@@ -219,10 +229,13 @@ def _run_once(
         sys.stdout.write(f"{_sanitize_cli_text(message)}\n")
         sys.stdout.flush()
 
+    def approval_callback(message: str) -> bool:
+        return typer.confirm(f"Approve action? {_sanitize_cli_text(message)}", default=False)
+
     cmd, actual_input = _parse_command(user_input)
 
     planner = None
-    if cmd == "/plan":
+    if cmd == "/plan-execute":
         planner = LLMPlanner(
             model_client=model_client,
             skill_catalog=_format_skill_catalog_for_planner(skill_registry),
@@ -251,6 +264,8 @@ def _run_once(
         notification_callback=notification_callback,
         skill_registry=skill_registry,
         skill_preprocessor=skill_preprocessor,
+        permission_policy=permission_policy,
+        approval_callback=approval_callback if interactive_approval else None,
     )
     if stream_output:
         if not streamed_output and result.final_message.content:
@@ -322,6 +337,13 @@ def _build_skill_registry(settings: Settings) -> SkillRegistry:
     user_root = settings.user_skills_dir if settings.skills_enabled else None
     skills = load_skills(builtin_root=builtin_root, user_root=user_root, project_root=project_root)
     return SkillRegistry(skills)
+
+
+def _build_permission_policy(settings: Settings) -> PermissionPolicy:
+    rules: tuple[PermissionRule, ...] = ()
+    if settings.permission_rules_file is not None:
+        rules = load_permission_rules(settings.permission_rules_file)
+    return PermissionPolicy(mode=settings.permission_mode, rules=rules)
 
 
 def _require_settings(obj: object) -> Settings:

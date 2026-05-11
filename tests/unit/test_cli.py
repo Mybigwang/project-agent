@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 import project_agent.cli as cli_module
 from project_agent.cli import app
 from project_agent.config import Settings
+from project_agent.runtime.permissions import PermissionMode
 from project_agent.core.types import AgentTraceStep, Message, SkillCall, Task, TaskPlan
 from project_agent.errors import AgentError, ConfigurationError
 
@@ -48,6 +49,8 @@ def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "skills_allow_command_substitution": False,
         "skills_max_composition_depth": 3,
         "skills_max_expansion_chars": 20000,
+        "permission_mode": PermissionMode.DEFAULT,
+        "permission_rules_file": None,
         **overrides,
     }
     return Settings(**values)
