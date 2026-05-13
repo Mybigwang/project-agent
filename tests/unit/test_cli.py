@@ -51,6 +51,18 @@ def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "skills_max_expansion_chars": 20000,
         "permission_mode": PermissionMode.DEFAULT,
         "permission_rules_file": None,
+        "context_window_tokens": 200000,
+        "context_trigger_fill_ratio": 0.87,
+        "context_recover_fill_ratio": 0.82,
+        "context_circuit_breaker_failures": 3,
+        "context_recent_tool_results_keep": 5,
+        "context_tool_result_preview_chars": 400,
+        "context_summary_max_tokens": 4000,
+        "context_profile": "compact-default",
+        "context_profile_version": "2026-05-12",
+        "enable_auto_compaction": True,
+        "enable_full_compaction": True,
+        "repository_context_max_tokens": 6000,
         **overrides,
     }
     return Settings(**values)

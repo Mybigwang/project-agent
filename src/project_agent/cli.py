@@ -14,6 +14,13 @@ from project_agent.errors import AgentError, map_exception_to_exit_code
 from project_agent.logging import configure_logging
 from project_agent.runtime.agent import AgentRuntime
 from project_agent.runtime.context import RepositoryContextBuilder
+from project_agent.runtime.context_management import (
+    AutoCompactionPolicy,
+    CompactionSummaryBuilder,
+    ContextManager,
+    HeuristicTokenEstimator,
+    MicroCompactor,
+)
 from project_agent.runtime.model_clients import MockModelClient, OpenAICompatibleModelClient
 from project_agent.runtime.permissions import PermissionPolicy
 from project_agent.runtime.permissions.policy import load_permission_rules
@@ -126,6 +133,28 @@ def run(
             allow_command_substitution=settings.skills_allow_command_substitution
         ),
     )
+    context_manager = ContextManager(
+        budget_estimator=HeuristicTokenEstimator(),
+        micro_compactor=MicroCompactor(
+            recent_tool_results_keep=settings.context_recent_tool_results_keep,
+            tool_result_preview_chars=settings.context_tool_result_preview_chars,
+        ),
+        auto_compaction_policy=AutoCompactionPolicy(
+            trigger_fill_ratio=settings.context_trigger_fill_ratio,
+            recover_fill_ratio=settings.context_recover_fill_ratio,
+            circuit_breaker_failures=settings.context_circuit_breaker_failures,
+        ),
+        summary_builder=CompactionSummaryBuilder(
+            profile=settings.context_profile,
+            version=settings.context_profile_version,
+            max_summary_tokens=settings.context_summary_max_tokens,
+        ),
+        context_window_tokens=settings.context_window_tokens,
+        profile=settings.context_profile,
+        version=settings.context_profile_version,
+        enable_auto_compaction=settings.enable_auto_compaction,
+        enable_full_compaction=settings.enable_full_compaction,
+    )
     active_session_id = session_id or uuid4().hex
     active_max_steps = max_steps or settings.max_steps
     should_stream = settings.stream_output if stream is None else stream
@@ -147,6 +176,7 @@ def run(
             skill_registry=skill_registry,
             skill_preprocessor=skill_preprocessor,
             permission_policy=permission_policy,
+            context_manager=context_manager,
             interactive_approval=False,
         )
         return
@@ -172,6 +202,7 @@ def run(
             skill_registry=skill_registry,
             skill_preprocessor=skill_preprocessor,
             permission_policy=permission_policy,
+            context_manager=context_manager,
             interactive_approval=True,
         )
 
@@ -212,6 +243,7 @@ def _run_once(
     skill_registry: SkillRegistry,
     skill_preprocessor: SkillPromptPreprocessor,
     permission_policy: PermissionPolicy,
+    context_manager: ContextManager,
     interactive_approval: bool,
 ) -> None:
     import sys
@@ -266,6 +298,7 @@ def _run_once(
         skill_preprocessor=skill_preprocessor,
         permission_policy=permission_policy,
         approval_callback=approval_callback if interactive_approval else None,
+        context_manager=context_manager,
     )
     if stream_output:
         if not streamed_output and result.final_message.content:

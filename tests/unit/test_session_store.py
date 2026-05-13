@@ -4,7 +4,17 @@ from pathlib import Path
 
 import pytest
 
-from project_agent.core.types import Message, SessionState, Task, TaskPlan, ToolCall
+from project_agent.core.types import (
+    AutoCompactionState,
+    BudgetSnapshot,
+    CompactionSummarySnapshot,
+    ContextManagementState,
+    Message,
+    SessionState,
+    Task,
+    TaskPlan,
+    ToolCall,
+)
 from project_agent.errors import SessionError
 from project_agent.runtime.session_store import FileSessionStore
 
@@ -75,6 +85,44 @@ def test_file_session_store_persists_tool_call_messages(tmp_path: Path) -> None:
     assert store.load("session-1") == state
 
 
+def test_file_session_store_persists_context_management_state(tmp_path: Path) -> None:
+    store = FileSessionStore(tmp_path)
+    state = SessionState(
+        context_state=ContextManagementState(
+            profile="compact-default",
+            version="v1",
+            turn_count=2,
+            latest_budget=BudgetSnapshot(
+                estimated_tokens_used=120,
+                estimated_tokens_limit=200,
+                fill_ratio=0.6,
+                profile="compact-default",
+                version="v1",
+            ),
+            auto_compaction=AutoCompactionState(
+                fail_streak=1,
+                last_fill_ratio=0.6,
+                circuit_open=False,
+                last_error="temporary",
+                last_compacted_turn=1,
+            ),
+            summary_snapshot=CompactionSummarySnapshot(
+                profile="compact-default",
+                version="v1",
+                summary_text="Intent: investigate",
+                intent="investigate",
+                concepts=("context",),
+                tasks=("Fix runtime",),
+                source_message_count=3,
+            ),
+        )
+    )
+
+    store.save("session-1", state)
+
+    assert store.load("session-1") == state
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -98,6 +146,7 @@ def test_file_session_store_persists_tool_call_messages(tmp_path: Path) -> None:
             '"tool_calls": [{"name": "echo", "arguments": {}}]}], '
             '"task_plan": null}'
         ),
+        '{"messages": [], "task_plan": null, "context_state": "invalid"}',
     ],
 )
 def test_file_session_store_rejects_invalid_message_schema(
@@ -157,3 +206,14 @@ def test_file_session_store_rejects_invalid_task_plan_schema(
 
     with pytest.raises(SessionError, match="failed to load session: session-1"):
         store.load("session-1")
+
+
+def test_file_session_store_loads_legacy_session_without_context_state(tmp_path: Path) -> None:
+    store = FileSessionStore(tmp_path)
+    path = tmp_path / "session-1.json"
+    path.write_text('{"messages": [{"role": "user", "content": "hello"}], "task_plan": null}', encoding="utf-8")
+
+    state = store.load("session-1")
+
+    assert state.messages == (Message(role="user", content="hello"),)
+    assert state.context_state is None

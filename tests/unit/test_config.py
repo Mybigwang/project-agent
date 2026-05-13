@@ -34,6 +34,18 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PROJECT_AGENT_SKILLS_ALLOW_COMMAND_SUBSTITUTION", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_SKILLS_MAX_COMPOSITION_DEPTH", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_SKILLS_MAX_EXPANSION_CHARS", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_CONTEXT_WINDOW_TOKENS", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_CONTEXT_TRIGGER_FILL_RATIO", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_CONTEXT_RECOVER_FILL_RATIO", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_CONTEXT_CIRCUIT_BREAKER_FAILURES", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_CONTEXT_RECENT_TOOL_RESULTS_KEEP", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_CONTEXT_TOOL_RESULT_PREVIEW_CHARS", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_CONTEXT_SUMMARY_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_CONTEXT_PROFILE", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_CONTEXT_PROFILE_VERSION", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_ENABLE_AUTO_COMPACTION", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_ENABLE_FULL_COMPACTION", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_REPOSITORY_CONTEXT_MAX_TOKENS", raising=False)
 
     settings = load_settings()
 
@@ -64,6 +76,18 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.skills_max_expansion_chars == 20000
     assert settings.permission_mode == PermissionMode.DEFAULT
     assert settings.permission_rules_file is None
+    assert settings.context_window_tokens == 200000
+    assert settings.context_trigger_fill_ratio == 0.87
+    assert settings.context_recover_fill_ratio == 0.82
+    assert settings.context_circuit_breaker_failures == 3
+    assert settings.context_recent_tool_results_keep == 5
+    assert settings.context_tool_result_preview_chars == 400
+    assert settings.context_summary_max_tokens == 4000
+    assert settings.context_profile == "compact-default"
+    assert settings.context_profile_version == "2026-05-12"
+    assert settings.enable_auto_compaction is True
+    assert settings.enable_full_compaction is True
+    assert settings.repository_context_max_tokens == 6000
 
 
 def test_load_settings_honors_override_precedence(
@@ -369,4 +393,144 @@ def test_load_settings_rejects_removed_auto_permission_mode(tmp_path: Path) -> N
     )
 
     with pytest.raises(ConfigurationError, match="invalid permission mode"):
+        load_settings(config_path=config_path)
+
+
+def test_load_settings_supports_context_management_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        (
+            "[project_agent]\n"
+            "context_window_tokens = 1000\n"
+            "context_trigger_fill_ratio = 0.8\n"
+            "context_recover_fill_ratio = 0.7\n"
+            "context_circuit_breaker_failures = 2\n"
+            "context_recent_tool_results_keep = 4\n"
+            "context_tool_result_preview_chars = 120\n"
+            "context_summary_max_tokens = 600\n"
+            "context_profile = 'config-profile'\n"
+            "context_profile_version = 'v1'\n"
+            "enable_auto_compaction = false\n"
+            "enable_full_compaction = false\n"
+            "repository_context_max_tokens = 300\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROJECT_AGENT_CONTEXT_WINDOW_TOKENS", "2000")
+    monkeypatch.setenv("PROJECT_AGENT_CONTEXT_TRIGGER_FILL_RATIO", "0.85")
+    monkeypatch.setenv("PROJECT_AGENT_CONTEXT_RECOVER_FILL_RATIO", "0.75")
+    monkeypatch.setenv("PROJECT_AGENT_CONTEXT_CIRCUIT_BREAKER_FAILURES", "3")
+    monkeypatch.setenv("PROJECT_AGENT_CONTEXT_RECENT_TOOL_RESULTS_KEEP", "5")
+    monkeypatch.setenv("PROJECT_AGENT_CONTEXT_TOOL_RESULT_PREVIEW_CHARS", "240")
+    monkeypatch.setenv("PROJECT_AGENT_CONTEXT_SUMMARY_MAX_TOKENS", "700")
+    monkeypatch.setenv("PROJECT_AGENT_CONTEXT_PROFILE", "env-profile")
+    monkeypatch.setenv("PROJECT_AGENT_CONTEXT_PROFILE_VERSION", "env-v1")
+    monkeypatch.setenv("PROJECT_AGENT_ENABLE_AUTO_COMPACTION", "true")
+    monkeypatch.setenv("PROJECT_AGENT_ENABLE_FULL_COMPACTION", "true")
+    monkeypatch.setenv("PROJECT_AGENT_REPOSITORY_CONTEXT_MAX_TOKENS", "500")
+
+    settings = load_settings(
+        config_path=config_path,
+        overrides={
+            "context_window_tokens": "3000",
+            "context_trigger_fill_ratio": "0.86",
+            "context_recover_fill_ratio": "0.76",
+            "context_circuit_breaker_failures": "4",
+            "context_recent_tool_results_keep": "6",
+            "context_tool_result_preview_chars": "360",
+            "context_summary_max_tokens": "800",
+            "context_profile": "cli-profile",
+            "context_profile_version": "cli-v1",
+            "enable_auto_compaction": "false",
+            "enable_full_compaction": "false",
+            "repository_context_max_tokens": "700",
+        },
+    )
+
+    assert settings.context_window_tokens == 3000
+    assert settings.context_trigger_fill_ratio == 0.86
+    assert settings.context_recover_fill_ratio == 0.76
+    assert settings.context_circuit_breaker_failures == 4
+    assert settings.context_recent_tool_results_keep == 6
+    assert settings.context_tool_result_preview_chars == 360
+    assert settings.context_summary_max_tokens == 800
+    assert settings.context_profile == "cli-profile"
+    assert settings.context_profile_version == "cli-v1"
+    assert settings.enable_auto_compaction is False
+    assert settings.enable_full_compaction is False
+    assert settings.repository_context_max_tokens == 700
+
+
+@pytest.mark.parametrize(
+    ("config_line", "error_message"),
+    [
+        ("context_window_tokens = 0\n", "context_window_tokens must be >= 1"),
+        (
+            "context_trigger_fill_ratio = 1\n",
+            "context_trigger_fill_ratio must be > 0 and < 1",
+        ),
+        (
+            "context_recover_fill_ratio = 0\n",
+            "context_recover_fill_ratio must be > 0 and < 1",
+        ),
+        (
+            "context_circuit_breaker_failures = 0\n",
+            "context_circuit_breaker_failures must be >= 1",
+        ),
+        (
+            "context_recent_tool_results_keep = 0\n",
+            "context_recent_tool_results_keep must be >= 1",
+        ),
+        (
+            "context_tool_result_preview_chars = 0\n",
+            "context_tool_result_preview_chars must be >= 1",
+        ),
+        (
+            "context_summary_max_tokens = 0\n",
+            "context_summary_max_tokens must be >= 1",
+        ),
+        (
+            "repository_context_max_tokens = 0\n",
+            "repository_context_max_tokens must be >= 1",
+        ),
+    ],
+)
+def test_load_settings_rejects_invalid_context_management_limits(
+    tmp_path: Path,
+    config_line: str,
+    error_message: str,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(f"[project_agent]\n{config_line}", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match=error_message):
+        load_settings(config_path=config_path)
+
+
+def test_load_settings_rejects_context_recover_ratio_not_below_trigger(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[project_agent]\ncontext_trigger_fill_ratio = 0.8\ncontext_recover_fill_ratio = 0.8\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ConfigurationError,
+        match="context_recover_fill_ratio must be < context_trigger_fill_ratio",
+    ):
+        load_settings(config_path=config_path)
+
+
+@pytest.mark.parametrize("field_name", ["context_profile", "context_profile_version"])
+def test_load_settings_rejects_blank_context_identity_fields(tmp_path: Path, field_name: str) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"[project_agent]\n{field_name} = '   '\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match=f"{field_name} must be a non-empty string"):
         load_settings(config_path=config_path)

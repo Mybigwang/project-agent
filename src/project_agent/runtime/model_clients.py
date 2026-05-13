@@ -88,7 +88,7 @@ class OpenAICompatibleModelClient(StreamingModelClient):
 
     def _accumulate_stream_chat_completions(
         self, payload: dict[str, object], stream_callback: Callable[[str], None]
-    ) -> Message | tuple[ToolCall, ...]:
+    ) -> Message | SkillCall | tuple[ToolCall, ...]:
         body = json.dumps(payload).encode("utf-8")
         path = f"{self._base_url.path}/chat/completions"
         headers = {

@@ -43,6 +43,18 @@ class Settings:
     skills_max_expansion_chars: int
     permission_mode: PermissionMode
     permission_rules_file: Path | None
+    context_window_tokens: int
+    context_trigger_fill_ratio: float
+    context_recover_fill_ratio: float
+    context_circuit_breaker_failures: int
+    context_recent_tool_results_keep: int
+    context_tool_result_preview_chars: int
+    context_summary_max_tokens: int
+    context_profile: str
+    context_profile_version: str
+    enable_auto_compaction: bool
+    enable_full_compaction: bool
+    repository_context_max_tokens: int
 
 
 def load_settings(
@@ -272,6 +284,107 @@ def load_settings(
         ),
         workspace_root=workspace_root,
     )
+    context_window_tokens = int(
+        override_values.get(
+            "context_window_tokens",
+            os.getenv(
+                "PROJECT_AGENT_CONTEXT_WINDOW_TOKENS",
+                config_values.get("context_window_tokens", "200000"),
+            ),
+        )
+    )
+    context_trigger_fill_ratio = float(
+        override_values.get(
+            "context_trigger_fill_ratio",
+            os.getenv(
+                "PROJECT_AGENT_CONTEXT_TRIGGER_FILL_RATIO",
+                config_values.get("context_trigger_fill_ratio", "0.87"),
+            ),
+        )
+    )
+    context_recover_fill_ratio = float(
+        override_values.get(
+            "context_recover_fill_ratio",
+            os.getenv(
+                "PROJECT_AGENT_CONTEXT_RECOVER_FILL_RATIO",
+                config_values.get("context_recover_fill_ratio", "0.82"),
+            ),
+        )
+    )
+    context_circuit_breaker_failures = int(
+        override_values.get(
+            "context_circuit_breaker_failures",
+            os.getenv(
+                "PROJECT_AGENT_CONTEXT_CIRCUIT_BREAKER_FAILURES",
+                config_values.get("context_circuit_breaker_failures", "3"),
+            ),
+        )
+    )
+    context_recent_tool_results_keep = int(
+        override_values.get(
+            "context_recent_tool_results_keep",
+            os.getenv(
+                "PROJECT_AGENT_CONTEXT_RECENT_TOOL_RESULTS_KEEP",
+                config_values.get("context_recent_tool_results_keep", "5"),
+            ),
+        )
+    )
+    context_tool_result_preview_chars = int(
+        override_values.get(
+            "context_tool_result_preview_chars",
+            os.getenv(
+                "PROJECT_AGENT_CONTEXT_TOOL_RESULT_PREVIEW_CHARS",
+                config_values.get("context_tool_result_preview_chars", "400"),
+            ),
+        )
+    )
+    context_summary_max_tokens = int(
+        override_values.get(
+            "context_summary_max_tokens",
+            os.getenv(
+                "PROJECT_AGENT_CONTEXT_SUMMARY_MAX_TOKENS",
+                config_values.get("context_summary_max_tokens", "4000"),
+            ),
+        )
+    )
+    context_profile = override_values.get(
+        "context_profile",
+        os.getenv("PROJECT_AGENT_CONTEXT_PROFILE", config_values.get("context_profile", "compact-default")),
+    )
+    context_profile_version = override_values.get(
+        "context_profile_version",
+        os.getenv(
+            "PROJECT_AGENT_CONTEXT_PROFILE_VERSION",
+            config_values.get("context_profile_version", "2026-05-12"),
+        ),
+    )
+    enable_auto_compaction = _parse_bool(
+        override_values.get(
+            "enable_auto_compaction",
+            os.getenv(
+                "PROJECT_AGENT_ENABLE_AUTO_COMPACTION",
+                config_values.get("enable_auto_compaction", "true"),
+            ),
+        )
+    )
+    enable_full_compaction = _parse_bool(
+        override_values.get(
+            "enable_full_compaction",
+            os.getenv(
+                "PROJECT_AGENT_ENABLE_FULL_COMPACTION",
+                config_values.get("enable_full_compaction", "true"),
+            ),
+        )
+    )
+    repository_context_max_tokens = int(
+        override_values.get(
+            "repository_context_max_tokens",
+            os.getenv(
+                "PROJECT_AGENT_REPOSITORY_CONTEXT_MAX_TOKENS",
+                config_values.get("repository_context_max_tokens", "6000"),
+            ),
+        )
+    )
 
     _validate_log_level(log_level)
     _validate_max_steps(max_steps)
@@ -287,6 +400,18 @@ def load_settings(
     _validate_positive_number(context_command_timeout_seconds, "context_command_timeout_seconds")
     _validate_positive_int(skills_max_composition_depth, "skills_max_composition_depth")
     _validate_positive_int(skills_max_expansion_chars, "skills_max_expansion_chars")
+    _validate_positive_int(context_window_tokens, "context_window_tokens")
+    _validate_ratio(context_trigger_fill_ratio, "context_trigger_fill_ratio")
+    _validate_ratio(context_recover_fill_ratio, "context_recover_fill_ratio")
+    if context_recover_fill_ratio >= context_trigger_fill_ratio:
+        raise ConfigurationError("context_recover_fill_ratio must be < context_trigger_fill_ratio")
+    _validate_positive_int(context_circuit_breaker_failures, "context_circuit_breaker_failures")
+    _validate_positive_int(context_recent_tool_results_keep, "context_recent_tool_results_keep")
+    _validate_positive_int(context_tool_result_preview_chars, "context_tool_result_preview_chars")
+    _validate_positive_int(context_summary_max_tokens, "context_summary_max_tokens")
+    _validate_positive_int(repository_context_max_tokens, "repository_context_max_tokens")
+    _validate_non_empty_string(context_profile, "context_profile")
+    _validate_non_empty_string(context_profile_version, "context_profile_version")
 
     return Settings(
         workspace_root=workspace_root,
@@ -318,6 +443,18 @@ def load_settings(
         skills_max_expansion_chars=skills_max_expansion_chars,
         permission_mode=permission_mode,
         permission_rules_file=permission_rules_file,
+        context_window_tokens=context_window_tokens,
+        context_trigger_fill_ratio=context_trigger_fill_ratio,
+        context_recover_fill_ratio=context_recover_fill_ratio,
+        context_circuit_breaker_failures=context_circuit_breaker_failures,
+        context_recent_tool_results_keep=context_recent_tool_results_keep,
+        context_tool_result_preview_chars=context_tool_result_preview_chars,
+        context_summary_max_tokens=context_summary_max_tokens,
+        context_profile=context_profile,
+        context_profile_version=context_profile_version,
+        enable_auto_compaction=enable_auto_compaction,
+        enable_full_compaction=enable_full_compaction,
+        repository_context_max_tokens=repository_context_max_tokens,
     )
 
 
@@ -386,3 +523,13 @@ def _validate_positive_number(value: float, key: str) -> None:
 def _validate_positive_int(value: int, key: str) -> None:
     if value < 1:
         raise ConfigurationError(f"{key} must be >= 1")
+
+
+def _validate_ratio(value: float, key: str) -> None:
+    if value <= 0 or value >= 1:
+        raise ConfigurationError(f"{key} must be > 0 and < 1")
+
+
+def _validate_non_empty_string(value: str, key: str) -> None:
+    if not value.strip():
+        raise ConfigurationError(f"{key} must be a non-empty string")

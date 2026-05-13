@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from project_agent.core.types import (
+    ContextManagementState,
     Message,
     RepositoryContext,
     SessionState,
@@ -225,6 +226,41 @@ class EmptyRepositoryContextBuilder:
         return RepositoryContext(rendered="", workspace=None, git=None, rules=(), relevant_files=())
 
 
+class PassthroughContextManager:
+    def prepare_messages(
+        self,
+        *,
+        messages: Sequence[Message],
+        task_plan: TaskPlan | None,
+        existing_state: ContextManagementState | None,
+    ) -> tuple[tuple[Message, ...], ContextManagementState | None]:
+        del task_plan
+        return tuple(messages), existing_state or ContextManagementState(profile="compact-default", version="v1")
+
+
+class RecordingContextManager:
+    def __init__(self) -> None:
+        self.received_states: tuple[ContextManagementState | None, ...] = ()
+        self.received_messages: tuple[tuple[Message, ...], ...] = ()
+
+    def prepare_messages(
+        self,
+        *,
+        messages: Sequence[Message],
+        task_plan: TaskPlan | None,
+        existing_state: ContextManagementState | None,
+    ) -> tuple[tuple[Message, ...], ContextManagementState | None]:
+        del task_plan
+        self.received_states = (*self.received_states, existing_state)
+        self.received_messages = (*self.received_messages, tuple(messages))
+        next_turn_count = 1 if existing_state is None else existing_state.turn_count + 1
+        return tuple(messages), ContextManagementState(
+            profile="compact-default",
+            version="v1",
+            turn_count=next_turn_count,
+        )
+
+
 @pytest.fixture
 def runtime() -> AgentRuntime:
     return AgentRuntime()
@@ -281,19 +317,22 @@ def test_agent_runtime_preserves_tool_call_id_for_follow_up_request(
     tmp_path: Path,
 ) -> None:
     model_client = ToolCallCapturingModelClient()
+    context_manager = RecordingContextManager()
 
     result = runtime.run_turn(
         session_id="session-1",
         user_input="use tool ping",
-        model_client=model_client,  # type: ignore[arg-type]
+        model_client=model_client,
         tools=[EchoTool()],
         session_store=store,
         workspace_root=tmp_path,
         max_steps=3,
+        context_manager=context_manager,
     )
 
     assert result.final_message.content == "done"
     assert len(model_client.calls) == 2
+    assert len(context_manager.received_messages) == 2
     second_call_messages = model_client.calls[1]
     assert second_call_messages[-2] == Message(
         role="assistant",
@@ -308,6 +347,8 @@ def test_agent_runtime_preserves_tool_call_id_for_follow_up_request(
         ),
         tool_call_id="call_123",
     )
+    assert context_manager.received_messages[1][-2] == second_call_messages[-2]
+    assert context_manager.received_messages[1][-1] == second_call_messages[-1]
 
 
 def test_agent_runtime_executes_multiple_tool_calls_from_one_model_response(
@@ -320,7 +361,7 @@ def test_agent_runtime_executes_multiple_tool_calls_from_one_model_response(
     result = runtime.run_turn(
         session_id="session-1",
         user_input="use multiple tools",
-        model_client=model_client,  # type: ignore[arg-type]
+        model_client=model_client,
         tools=[EchoTool()],
         session_store=store,
         workspace_root=tmp_path,
@@ -357,8 +398,7 @@ def test_agent_runtime_stops_multiple_tool_calls_after_first_error(
     result = runtime.run_turn(
         session_id="session-1",
         user_input="use multiple tools with error",
-        model_client=MultiToolCallWithErrorModelClient(),  # type: ignore[arg-type]
-        tools=[EchoTool(), side_effect_tool],
+        model_client=MultiToolCallWithErrorModelClient(),        tools=[EchoTool(), side_effect_tool],
         session_store=store,
         workspace_root=tmp_path,
         max_steps=3,
@@ -428,7 +468,7 @@ def test_agent_runtime_injects_repository_context_before_history_and_user_messag
     result = runtime.run_turn(
         session_id="session-1",
         user_input="hello",
-        model_client=model_client,  # type: ignore[arg-type]
+        model_client=model_client,
         tools=[EchoTool()],
         session_store=store,
         workspace_root=tmp_path,
@@ -463,7 +503,7 @@ def test_agent_runtime_skips_repository_context_when_disabled(
     runtime.run_turn(
         session_id="session-1",
         user_input="hello",
-        model_client=model_client,  # type: ignore[arg-type]
+        model_client=model_client,
         tools=[EchoTool()],
         session_store=store,
         workspace_root=tmp_path,
@@ -485,7 +525,7 @@ def test_agent_runtime_skips_empty_repository_context(
     runtime.run_turn(
         session_id="session-1",
         user_input="hello",
-        model_client=model_client,  # type: ignore[arg-type]
+        model_client=model_client,
         tools=[EchoTool()],
         session_store=store,
         workspace_root=tmp_path,
@@ -495,6 +535,65 @@ def test_agent_runtime_skips_empty_repository_context(
     )
 
     assert [message.role for message in model_client.messages] == ["user"]
+
+
+def test_agent_runtime_persists_context_state_from_context_manager(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    runtime.run_turn(
+        session_id="session-1",
+        user_input="hello",
+        model_client=CapturingModelClient(),
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        context_manager=PassthroughContextManager(),
+    )
+
+    context_state = store.load("session-1").context_state
+    assert context_state is not None
+    assert context_state.profile == "compact-default"
+
+
+def test_agent_runtime_propagates_context_state_across_planned_tasks(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    planner = SequencePlanner(
+        TaskPlan(
+            tasks=(
+                Task(id="task_1", title="First", description="First"),
+                Task(id="task_2", title="Second", description="Second", dependencies=("task_1",)),
+            )
+        )
+    )
+    context_manager = RecordingContextManager()
+
+    runtime.run_turn(
+        session_id="session-1",
+        user_input="hello",
+        model_client=CapturingModelClient(),
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=8,
+        planner=planner,
+        context_manager=context_manager,
+    )
+
+    assert len(context_manager.received_states) == 2
+    assert context_manager.received_states[0] is None
+    assert context_manager.received_states[1] is not None
+    assert context_manager.received_states[1].turn_count == 1
+    assert context_manager.received_messages[0][0].content.startswith("Execute the current task.")
+    assert context_manager.received_messages[1][0].content.startswith("Execute the current task.")
+    context_state = store.load("session-1").context_state
+    assert context_state is not None
+    assert context_state.turn_count == 2
 
 
 class AlwaysBoomModelClient:
@@ -575,7 +674,7 @@ def test_agent_runtime_executes_planned_tasks_and_persists_task_plan(
     result = runtime.run_turn(
         session_id="session-1",
         user_input="hello",
-        model_client=model_client,  # type: ignore[arg-type]
+        model_client=model_client,
         tools=[EchoTool()],
         session_store=store,
         workspace_root=tmp_path,
@@ -584,7 +683,8 @@ def test_agent_runtime_executes_planned_tasks_and_persists_task_plan(
     )
 
     assert result.final_message.content == "ok"
-    assert [task.status for task in result.task_plan.tasks] == ["completed", "completed"]  # type: ignore[union-attr]
+    assert result.task_plan is not None
+    assert [task.status for task in result.task_plan.tasks] == ["completed", "completed"]
     assert result.messages == (
         Message(role="user", content="hello"),
         Message(role="assistant", content="ok"),
@@ -618,7 +718,7 @@ def test_agent_runtime_resumes_unfinished_session_task_plan(
     result = runtime.run_turn(
         session_id="session-1",
         user_input="continue",
-        model_client=CapturingModelClient(),  # type: ignore[arg-type]
+        model_client=CapturingModelClient(),
         tools=[EchoTool()],
         session_store=store,
         workspace_root=tmp_path,
@@ -627,9 +727,9 @@ def test_agent_runtime_resumes_unfinished_session_task_plan(
     )
 
     assert planner.create_calls == 0
-    assert [task.id for task in result.task_plan.tasks] == ["task_1", "task_2"]  # type: ignore[union-attr]
-    assert [task.status for task in result.task_plan.tasks] == ["completed", "completed"]  # type: ignore[union-attr]
-
+    assert result.task_plan is not None
+    assert [task.id for task in result.task_plan.tasks] == ["task_1", "task_2"]
+    assert [task.status for task in result.task_plan.tasks] == ["completed", "completed"]
 
 def test_agent_runtime_unblocks_dependency_blocked_task_when_dependencies_complete(
     runtime: AgentRuntime,
@@ -653,7 +753,7 @@ def test_agent_runtime_unblocks_dependency_blocked_task_when_dependencies_comple
     result = runtime.run_turn(
         session_id="session-1",
         user_input="continue",
-        model_client=CapturingModelClient(),  # type: ignore[arg-type]
+        model_client=CapturingModelClient(),
         tools=[EchoTool()],
         session_store=store,
         workspace_root=tmp_path,
@@ -664,8 +764,8 @@ def test_agent_runtime_unblocks_dependency_blocked_task_when_dependencies_comple
     )
 
     assert result.final_message.content == "ok"
-    assert [task.status for task in result.task_plan.tasks] == ["completed", "completed"]  # type: ignore[union-attr]
-
+    assert result.task_plan is not None
+    assert [task.status for task in result.task_plan.tasks] == ["completed", "completed"]
 
 def test_agent_runtime_does_not_resume_failed_blocked_task(
     runtime: AgentRuntime,
@@ -692,7 +792,7 @@ def test_agent_runtime_does_not_resume_failed_blocked_task(
     result = runtime.run_turn(
         session_id="session-1",
         user_input="continue",
-        model_client=model_client,  # type: ignore[arg-type]
+        model_client=model_client,
         tools=[EchoTool()],
         session_store=store,
         workspace_root=tmp_path,
@@ -703,9 +803,9 @@ def test_agent_runtime_does_not_resume_failed_blocked_task(
     assert planner.create_calls == 0
     assert model_client.messages == ()
     assert result.final_message.content == "No executable tasks remain."
-    assert result.task_plan.tasks[0].status == "blocked"  # type: ignore[union-attr]
-    assert result.task_plan.tasks[0].last_error == "boom"  # type: ignore[union-attr]
-
+    assert result.task_plan is not None
+    assert result.task_plan.tasks[0].status == "blocked"
+    assert result.task_plan.tasks[0].last_error == "boom"
 
 
 
@@ -729,26 +829,33 @@ def test_agent_runtime_applies_model_selected_skill_and_continues(
     registry = SkillRegistry(load_skills(builtin_root=None, user_root=None, project_root=project_root))
     preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
     model_client = SkillCallCapturingModelClient()
+    context_manager = RecordingContextManager()
 
     result = runtime.run_turn(
         session_id="session-1",
         user_input="please review the change",
-        model_client=model_client,  # type: ignore[arg-type]
+        model_client=model_client,
         tools=[EchoTool()],
         session_store=store,
         workspace_root=tmp_path,
         max_steps=3,
         skill_registry=registry,
         skill_preprocessor=preprocessor,
+        context_manager=context_manager,
     )
 
     assert result.final_message.content == "done"
     assert [step.event for step in result.trace] == ["skill", "assistant"]
     assert any(message.content.startswith("Activated skill: review-change") for message in result.messages)
     assert len(model_client.calls) == 2
+    assert len(context_manager.received_messages) == 2
     assert any(
         message.role == "system" and "Review target src/module.py" in message.content
         for message in model_client.calls[1]
+    )
+    assert any(
+        message.role == "system" and message.content.startswith("Activated skill: review-change")
+        for message in context_manager.received_messages[1]
     )
 
 
@@ -778,7 +885,7 @@ def test_agent_runtime_emits_notification_for_model_selected_skill(
     result = runtime.run_turn(
         session_id="session-1",
         user_input="please review the change",
-        model_client=SkillCallCapturingModelClient(),  # type: ignore[arg-type]
+        model_client=SkillCallCapturingModelClient(),
         tools=[EchoTool()],
         session_store=store,
         workspace_root=tmp_path,
@@ -787,6 +894,9 @@ def test_agent_runtime_emits_notification_for_model_selected_skill(
         skill_registry=registry,
         skill_preprocessor=preprocessor,
     )
+
+    assert result.final_message.content == "done"
+    assert notifications == ["正在调用 skill: review-change"]
 
 
 def test_agent_runtime_rejects_unknown_model_selected_skill(
@@ -801,7 +911,7 @@ def test_agent_runtime_rejects_unknown_model_selected_skill(
         runtime.run_turn(
             session_id="session-1",
             user_input="please review the change",
-            model_client=UnknownSkillCallModelClient(),  # type: ignore[arg-type]
+            model_client=UnknownSkillCallModelClient(),
             tools=[EchoTool()],
             session_store=store,
             workspace_root=tmp_path,
@@ -836,7 +946,7 @@ def test_agent_runtime_rejects_non_selectable_model_selected_skill(
         runtime.run_turn(
             session_id="session-1",
             user_input="please review the change",
-            model_client=NonSelectableSkillCallModelClient(),  # type: ignore[arg-type]
+            model_client=NonSelectableSkillCallModelClient(),
             tools=[EchoTool()],
             session_store=store,
             workspace_root=tmp_path,
@@ -863,7 +973,7 @@ def test_agent_runtime_rejects_repeated_skill_selection_in_one_turn(
         runtime.run_turn(
             session_id="session-1",
             user_input="please review the change",
-            model_client=RepeatedSkillCallModelClient(),  # type: ignore[arg-type]
+            model_client=RepeatedSkillCallModelClient(),
             tools=[EchoTool()],
             session_store=store,
             workspace_root=tmp_path,
@@ -911,9 +1021,8 @@ def test_agent_runtime_requires_approval_without_callback_for_write_tool(
     assert result.data["reason_code"] == "permission_write_requires_approval"
 
 
-def cli_tool_registry(tools: list[object]) -> ToolRegistry:
+def cli_tool_registry(tools: Sequence[object]) -> ToolRegistry:
     return ToolRegistry(tools)  # type: ignore[arg-type]
-
 
 def _make_preprocessor(
     *,

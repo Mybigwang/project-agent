@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from project_agent.core.types import (
+    BudgetSnapshot,
+    CompactionSummarySnapshot,
+    ContextManagementState,
     Message,
     RepositoryContext,
     SessionState,
@@ -82,3 +85,34 @@ class RepositoryContextBuilderProtocol(Protocol):
         user_input: str,
         history: Sequence[Message],
     ) -> RepositoryContext: ...
+
+
+class ContextBudgetEstimatorProtocol(Protocol):
+    def estimate_messages(
+        self,
+        *,
+        messages: Sequence[Message],
+        token_limit: int,
+        profile: str,
+        version: str,
+    ) -> BudgetSnapshot: ...
+
+
+class CompactionSummaryBuilderProtocol(Protocol):
+    def build_summary(
+        self,
+        *,
+        messages: Sequence[Message],
+        task_plan: TaskPlan | None,
+        existing_state: ContextManagementState | None,
+    ) -> CompactionSummarySnapshot: ...
+
+
+class ContextManagerProtocol(Protocol):
+    def prepare_messages(
+        self,
+        *,
+        messages: Sequence[Message],
+        task_plan: TaskPlan | None,
+        existing_state: ContextManagementState | None,
+    ) -> tuple[tuple[Message, ...], ContextManagementState | None]: ...

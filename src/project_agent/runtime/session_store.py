@@ -5,7 +5,17 @@ import re
 from dataclasses import asdict
 from pathlib import Path
 
-from project_agent.core.types import Message, SessionState, Task, TaskPlan, ToolCall
+from project_agent.core.types import (
+    AutoCompactionState,
+    BudgetSnapshot,
+    CompactionSummarySnapshot,
+    ContextManagementState,
+    Message,
+    SessionState,
+    Task,
+    TaskPlan,
+    ToolCall,
+)
 from project_agent.errors import SessionError
 
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -68,6 +78,7 @@ def _serialize_session_state(state: SessionState) -> dict[str, object]:
     return {
         "messages": [asdict(message) for message in state.messages],
         "task_plan": _serialize_task_plan(state.task_plan),
+        "context_state": _serialize_context_state(state.context_state),
     }
 
 
@@ -76,11 +87,13 @@ def _deserialize_session_state(payload: object) -> SessionState:
         raise ValueError("session state must be an object")
     messages = payload["messages"]
     task_plan = payload.get("task_plan")
+    context_state = payload.get("context_state")
     if not isinstance(messages, list):
         raise ValueError("session messages must be a list")
     return SessionState(
         messages=tuple(_deserialize_message(item) for item in messages),
         task_plan=_deserialize_task_plan(task_plan),
+        context_state=_deserialize_context_state(context_state),
     )
 
 
@@ -260,3 +273,206 @@ def _deserialize_tool_call(item: object) -> ToolCall:
     if not isinstance(call_id, str) or not call_id:
         raise ValueError("session tool call id must be a non-empty string")
     return ToolCall(name=name, arguments=arguments, call_id=call_id)
+
+
+def _serialize_context_state(
+    context_state: ContextManagementState | None,
+) -> dict[str, object] | None:
+    if context_state is None:
+        return None
+    return {
+        "profile": context_state.profile,
+        "version": context_state.version,
+        "turn_count": context_state.turn_count,
+        "latest_budget": _serialize_budget_snapshot(context_state.latest_budget),
+        "auto_compaction": _serialize_auto_compaction_state(context_state.auto_compaction),
+        "summary_snapshot": _serialize_summary_snapshot(context_state.summary_snapshot),
+    }
+
+
+def _deserialize_context_state(payload: object) -> ContextManagementState | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ValueError("context_state must be an object")
+    profile = payload["profile"]
+    version = payload["version"]
+    turn_count = payload.get("turn_count", 0)
+    if not isinstance(profile, str) or not profile:
+        raise ValueError("context_state profile must be a non-empty string")
+    if not isinstance(version, str) or not version:
+        raise ValueError("context_state version must be a non-empty string")
+    if not isinstance(turn_count, int) or turn_count < 0:
+        raise ValueError("context_state turn_count must be a non-negative integer")
+    return ContextManagementState(
+        profile=profile,
+        version=version,
+        turn_count=turn_count,
+        latest_budget=_deserialize_budget_snapshot(payload.get("latest_budget")),
+        auto_compaction=_deserialize_auto_compaction_state(payload.get("auto_compaction")),
+        summary_snapshot=_deserialize_summary_snapshot(payload.get("summary_snapshot")),
+    )
+
+
+def _serialize_budget_snapshot(snapshot: BudgetSnapshot | None) -> dict[str, object] | None:
+    if snapshot is None:
+        return None
+    return {
+        "estimated_tokens_used": snapshot.estimated_tokens_used,
+        "estimated_tokens_limit": snapshot.estimated_tokens_limit,
+        "fill_ratio": snapshot.fill_ratio,
+        "profile": snapshot.profile,
+        "version": snapshot.version,
+    }
+
+
+def _deserialize_budget_snapshot(payload: object) -> BudgetSnapshot | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ValueError("budget snapshot must be an object")
+    estimated_tokens_used = payload["estimated_tokens_used"]
+    estimated_tokens_limit = payload["estimated_tokens_limit"]
+    fill_ratio = payload["fill_ratio"]
+    profile = payload["profile"]
+    version = payload["version"]
+    if not isinstance(estimated_tokens_used, int) or estimated_tokens_used < 0:
+        raise ValueError("budget snapshot estimated_tokens_used must be a non-negative integer")
+    if not isinstance(estimated_tokens_limit, int) or estimated_tokens_limit < 1:
+        raise ValueError("budget snapshot estimated_tokens_limit must be >= 1")
+    if not isinstance(fill_ratio, (int, float)) or fill_ratio < 0:
+        raise ValueError("budget snapshot fill_ratio must be non-negative")
+    if not isinstance(profile, str) or not profile:
+        raise ValueError("budget snapshot profile must be a non-empty string")
+    if not isinstance(version, str) or not version:
+        raise ValueError("budget snapshot version must be a non-empty string")
+    return BudgetSnapshot(
+        estimated_tokens_used=estimated_tokens_used,
+        estimated_tokens_limit=estimated_tokens_limit,
+        fill_ratio=float(fill_ratio),
+        profile=profile,
+        version=version,
+    )
+
+
+def _serialize_auto_compaction_state(state: AutoCompactionState) -> dict[str, object]:
+    return {
+        "fail_streak": state.fail_streak,
+        "last_fill_ratio": state.last_fill_ratio,
+        "circuit_open": state.circuit_open,
+        "last_error": state.last_error,
+        "last_compacted_turn": state.last_compacted_turn,
+    }
+
+
+def _deserialize_auto_compaction_state(payload: object) -> AutoCompactionState:
+    if payload is None:
+        return AutoCompactionState()
+    if not isinstance(payload, dict):
+        raise ValueError("auto_compaction must be an object")
+    fail_streak = payload.get("fail_streak", 0)
+    last_fill_ratio = payload.get("last_fill_ratio")
+    circuit_open = payload.get("circuit_open", False)
+    last_error = payload.get("last_error")
+    last_compacted_turn = payload.get("last_compacted_turn")
+    if not isinstance(fail_streak, int) or fail_streak < 0:
+        raise ValueError("auto_compaction fail_streak must be a non-negative integer")
+    if last_fill_ratio is not None and (
+        not isinstance(last_fill_ratio, (int, float)) or last_fill_ratio < 0
+    ):
+        raise ValueError("auto_compaction last_fill_ratio must be non-negative")
+    if not isinstance(circuit_open, bool):
+        raise ValueError("auto_compaction circuit_open must be a boolean")
+    if last_error is not None and not isinstance(last_error, str):
+        raise ValueError("auto_compaction last_error must be a string")
+    if last_compacted_turn is not None and (
+        not isinstance(last_compacted_turn, int) or last_compacted_turn < 0
+    ):
+        raise ValueError("auto_compaction last_compacted_turn must be a non-negative integer")
+    return AutoCompactionState(
+        fail_streak=fail_streak,
+        last_fill_ratio=float(last_fill_ratio) if last_fill_ratio is not None else None,
+        circuit_open=circuit_open,
+        last_error=last_error,
+        last_compacted_turn=last_compacted_turn,
+    )
+
+
+def _serialize_summary_snapshot(
+    snapshot: CompactionSummarySnapshot | None,
+) -> dict[str, object] | None:
+    if snapshot is None:
+        return None
+    return {
+        "profile": snapshot.profile,
+        "version": snapshot.version,
+        "summary_text": snapshot.summary_text,
+        "intent": snapshot.intent,
+        "concepts": list(snapshot.concepts),
+        "files": list(snapshot.files),
+        "errors": list(snapshot.errors),
+        "message_highlights": list(snapshot.message_highlights),
+        "tasks": list(snapshot.tasks),
+        "current_focus": snapshot.current_focus,
+        "environment": list(snapshot.environment),
+        "kept_conclusions": list(snapshot.kept_conclusions),
+        "source_message_count": snapshot.source_message_count,
+    }
+
+
+def _deserialize_summary_snapshot(payload: object) -> CompactionSummarySnapshot | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ValueError("summary snapshot must be an object")
+    profile = payload["profile"]
+    version = payload["version"]
+    summary_text = payload["summary_text"]
+    intent = payload["intent"]
+    concepts = payload.get("concepts", [])
+    files = payload.get("files", [])
+    errors = payload.get("errors", [])
+    message_highlights = payload.get("message_highlights", [])
+    tasks = payload.get("tasks", [])
+    current_focus = payload.get("current_focus")
+    environment = payload.get("environment", [])
+    kept_conclusions = payload.get("kept_conclusions", [])
+    source_message_count = payload.get("source_message_count", 0)
+    if not isinstance(profile, str) or not profile:
+        raise ValueError("summary snapshot profile must be a non-empty string")
+    if not isinstance(version, str) or not version:
+        raise ValueError("summary snapshot version must be a non-empty string")
+    if not isinstance(summary_text, str):
+        raise ValueError("summary snapshot summary_text must be a string")
+    if not isinstance(intent, str):
+        raise ValueError("summary snapshot intent must be a string")
+    for field_name, value in {
+        "concepts": concepts,
+        "files": files,
+        "errors": errors,
+        "message_highlights": message_highlights,
+        "tasks": tasks,
+        "environment": environment,
+        "kept_conclusions": kept_conclusions,
+    }.items():
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"summary snapshot {field_name} must be strings")
+    if current_focus is not None and not isinstance(current_focus, str):
+        raise ValueError("summary snapshot current_focus must be a string")
+    if not isinstance(source_message_count, int) or source_message_count < 0:
+        raise ValueError("summary snapshot source_message_count must be a non-negative integer")
+    return CompactionSummarySnapshot(
+        profile=profile,
+        version=version,
+        summary_text=summary_text,
+        intent=intent,
+        concepts=tuple(concepts),
+        files=tuple(files),
+        errors=tuple(errors),
+        message_highlights=tuple(message_highlights),
+        tasks=tuple(tasks),
+        current_focus=current_focus,
+        environment=tuple(environment),
+        kept_conclusions=tuple(kept_conclusions),
+        source_message_count=source_message_count,
+    )

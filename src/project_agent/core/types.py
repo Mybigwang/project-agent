@@ -68,9 +68,55 @@ class TaskPlan:
 
 
 @dataclass(frozen=True)
+class BudgetSnapshot:
+    estimated_tokens_used: int
+    estimated_tokens_limit: int
+    fill_ratio: float
+    profile: str
+    version: str
+
+
+@dataclass(frozen=True)
+class AutoCompactionState:
+    fail_streak: int = 0
+    last_fill_ratio: float | None = None
+    circuit_open: bool = False
+    last_error: str | None = None
+    last_compacted_turn: int | None = None
+
+
+@dataclass(frozen=True)
+class CompactionSummarySnapshot:
+    profile: str
+    version: str
+    summary_text: str
+    intent: str
+    concepts: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+    message_highlights: tuple[str, ...] = ()
+    tasks: tuple[str, ...] = ()
+    current_focus: str | None = None
+    environment: tuple[str, ...] = ()
+    kept_conclusions: tuple[str, ...] = ()
+    source_message_count: int = 0
+
+
+@dataclass(frozen=True)
+class ContextManagementState:
+    profile: str
+    version: str
+    turn_count: int = 0
+    latest_budget: BudgetSnapshot | None = None
+    auto_compaction: AutoCompactionState = field(default_factory=AutoCompactionState)
+    summary_snapshot: CompactionSummarySnapshot | None = None
+
+
+@dataclass(frozen=True)
 class SessionState:
     messages: tuple[Message, ...] = ()
     task_plan: TaskPlan | None = None
+    context_state: ContextManagementState | None = None
 
 
 @dataclass(frozen=True)

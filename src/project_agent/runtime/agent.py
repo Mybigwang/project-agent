@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from project_agent.core.interfaces import (
+    ContextManagerProtocol,
     ModelClient,
     Planner,
     RepositoryContextBuilderProtocol,
@@ -13,6 +14,7 @@ from project_agent.core.interfaces import (
 )
 from project_agent.core.types import (
     AgentTraceStep,
+    ContextManagementState,
     Message,
     RunResult,
     SessionState,
@@ -48,6 +50,7 @@ class AgentRuntime:
         repository_context_builder: RepositoryContextBuilderProtocol | None = None,
         enable_repository_context: bool = True,
         planner: Planner | None = None,
+        context_manager: ContextManagerProtocol | None = None,
         stream_callback: Callable[[str], None] | None = None,
         notification_callback: NotificationCallback | None = None,
         skill_registry: SkillRegistry | None = None,
@@ -72,6 +75,7 @@ class AgentRuntime:
                 max_steps=max_steps,
                 repository_context_builder=repository_context_builder,
                 enable_repository_context=enable_repository_context,
+                context_manager=context_manager,
                 stream_callback=stream_callback,
                 notification_callback=notification_callback,
                 skill_registry=skill_registry,
@@ -89,6 +93,7 @@ class AgentRuntime:
         trace: tuple[AgentTraceStep, ...] = ()
         final_message: Message | None = None
         step = 1
+        context_state = state.context_state
         task_plan = self._refresh_blocked_statuses(task_plan)
 
         while True:
@@ -119,16 +124,19 @@ class AgentRuntime:
                 start_step=step,
                 repository_context_builder=repository_context_builder,
                 enable_repository_context=enable_repository_context,
+                context_manager=context_manager,
                 stream_callback=stream_callback,
                 notification_callback=notification_callback,
                 skill_registry=skill_registry,
                 skill_preprocessor=skill_preprocessor,
                 permission_policy=permission_policy,
                 approval_callback=approval_callback,
+                existing_context_state=context_state,
             )
             messages = task_result.messages
             trace = trace + task_result.trace
             step = task_result.next_step
+            context_state = task_result.context_state
             if task_result.error is None and task_result.final_message is not None:
                 final_message = task_result.final_message
                 task_plan = self._mark_task_status(task_plan, task.id, "completed")
@@ -193,7 +201,14 @@ class AgentRuntime:
             final_message = Message(role="assistant", content="No executable tasks remain.")
             messages = messages + (final_message,)
 
-        session_store.save(session_id, SessionState(messages=messages, task_plan=task_plan))
+        session_store.save(
+            session_id,
+            SessionState(
+                messages=messages,
+                task_plan=task_plan,
+                context_state=context_state,
+            ),
+        )
         return RunResult(
             final_message=final_message, messages=messages, trace=trace, task_plan=task_plan
         )
@@ -226,6 +241,7 @@ class AgentRuntime:
         max_steps: int,
         repository_context_builder: RepositoryContextBuilderProtocol | None,
         enable_repository_context: bool,
+        context_manager: ContextManagerProtocol | None,
         stream_callback: Callable[[str], None] | None,
         notification_callback: NotificationCallback | None,
         skill_registry: SkillRegistry | None,
@@ -233,7 +249,8 @@ class AgentRuntime:
         permission_policy: PermissionPolicy | None,
         approval_callback: ApprovalCallback | None,
     ) -> RunResult:
-        model_messages = self._build_model_messages(
+        context_state = session_store.load(session_id).context_state
+        model_messages, context_state = self._build_model_messages(
             history=history,
             messages=messages,
             user_input=user_input,
@@ -241,6 +258,9 @@ class AgentRuntime:
             repository_context_builder=repository_context_builder,
             enable_repository_context=enable_repository_context,
             skill_registry=skill_registry,
+            task_plan=None,
+            existing_context_state=context_state,
+            context_manager=context_manager,
         )
         trace: tuple[AgentTraceStep, ...] = ()
         skill_calls_used = 0
@@ -251,7 +271,10 @@ class AgentRuntime:
             )
             if isinstance(response, Message):
                 final_messages = messages + (response,)
-                session_store.save(session_id, SessionState(messages=final_messages))
+                session_store.save(
+                    session_id,
+                    SessionState(messages=final_messages, context_state=context_state),
+                )
                 trace = trace + (
                     AgentTraceStep(
                         step=step,
@@ -275,6 +298,18 @@ class AgentRuntime:
                     permission_policy=permission_policy,
                     approval_callback=approval_callback,
                 )
+                model_messages, context_state = self._build_model_messages(
+                    history=history,
+                    messages=messages,
+                    user_input=user_input,
+                    workspace_root=workspace_root,
+                    repository_context_builder=repository_context_builder,
+                    enable_repository_context=enable_repository_context,
+                    skill_registry=skill_registry,
+                    task_plan=None,
+                    existing_context_state=context_state,
+                    context_manager=context_manager,
+                )
                 skill_calls_used += 1
                 continue
 
@@ -289,7 +324,18 @@ class AgentRuntime:
                 role="assistant", content="", tool_calls=executed_tool_calls
             )
             messages = messages + (assistant_tool_message, *tool_messages)
-            model_messages = model_messages + (assistant_tool_message, *tool_messages)
+            model_messages, context_state = self._build_model_messages(
+                history=history,
+                messages=messages,
+                user_input=user_input,
+                workspace_root=workspace_root,
+                repository_context_builder=repository_context_builder,
+                enable_repository_context=enable_repository_context,
+                skill_registry=skill_registry,
+                task_plan=None,
+                existing_context_state=context_state,
+                context_manager=context_manager,
+            )
             trace = trace + tuple(
                 AgentTraceStep(
                     step=step,
@@ -313,7 +359,10 @@ class AgentRuntime:
             if tool_results and tool_results[-1].is_error:
                 final_message = Message(role="assistant", content=tool_results[-1].content)
                 final_messages = messages + (final_message,)
-                session_store.save(session_id, SessionState(messages=final_messages))
+                session_store.save(
+                    session_id,
+                    SessionState(messages=final_messages, context_state=context_state),
+                )
                 return RunResult(
                     final_message=final_message,
                     messages=final_messages,
@@ -337,14 +386,17 @@ class AgentRuntime:
         start_step: int,
         repository_context_builder: RepositoryContextBuilderProtocol | None,
         enable_repository_context: bool,
+        context_manager: ContextManagerProtocol | None,
         stream_callback: Callable[[str], None] | None,
         notification_callback: NotificationCallback | None,
         skill_registry: SkillRegistry | None,
         skill_preprocessor: SkillPromptPreprocessor | None,
         permission_policy: PermissionPolicy | None,
         approval_callback: ApprovalCallback | None,
+        existing_context_state: ContextManagementState | None,
     ) -> _TaskRunResult:
-        model_messages = self._build_model_messages(
+        task_context_message = self._task_context_message(task=task, task_plan=task_plan)
+        model_messages, context_state = self._build_model_messages(
             history=history,
             messages=messages,
             user_input=user_input,
@@ -352,10 +404,10 @@ class AgentRuntime:
             repository_context_builder=repository_context_builder,
             enable_repository_context=enable_repository_context,
             skill_registry=skill_registry,
-        )
-        model_messages = (
-            self._task_context_message(task=task, task_plan=task_plan),
-            *model_messages,
+            task_plan=task_plan,
+            existing_context_state=existing_context_state,
+            context_manager=context_manager,
+            prefix_messages=(task_context_message,),
         )
         trace: tuple[AgentTraceStep, ...] = ()
         step = start_step
@@ -382,6 +434,7 @@ class AgentRuntime:
                     next_step=step + 1,
                     final_message=response,
                     error=None,
+                    context_state=context_state,
                 )
 
             if isinstance(response, SkillCall):
@@ -399,6 +452,19 @@ class AgentRuntime:
                     approval_callback=approval_callback,
                     task_id=task.id,
                 )
+                model_messages, context_state = self._build_model_messages(
+                    history=history,
+                    messages=messages,
+                    user_input=user_input,
+                    workspace_root=workspace_root,
+                    repository_context_builder=repository_context_builder,
+                    enable_repository_context=enable_repository_context,
+                    skill_registry=skill_registry,
+                    task_plan=task_plan,
+                    existing_context_state=context_state,
+                    context_manager=context_manager,
+                    prefix_messages=(task_context_message,)
+                )
                 step += 1
                 task_step += 1
                 skill_calls_used += 1
@@ -415,7 +481,19 @@ class AgentRuntime:
                 role="assistant", content="", tool_calls=executed_tool_calls
             )
             messages = messages + (assistant_tool_message, *tool_messages)
-            model_messages = model_messages + (assistant_tool_message, *tool_messages)
+            model_messages, context_state = self._build_model_messages(
+                history=history,
+                messages=messages,
+                user_input=user_input,
+                workspace_root=workspace_root,
+                repository_context_builder=repository_context_builder,
+                enable_repository_context=enable_repository_context,
+                skill_registry=skill_registry,
+                task_plan=task_plan,
+                existing_context_state=context_state,
+                context_manager=context_manager,
+                prefix_messages=(task_context_message,)
+            )
             trace = trace + tuple(
                 AgentTraceStep(
                     step=step,
@@ -446,6 +524,7 @@ class AgentRuntime:
                     next_step=step,
                     final_message=None,
                     error=tool_results[-1].content,
+                    context_state=context_state,
                 )
 
         raise RuntimeLimitError(max_steps)
@@ -460,7 +539,11 @@ class AgentRuntime:
         repository_context_builder: RepositoryContextBuilderProtocol | None,
         enable_repository_context: bool,
         skill_registry: SkillRegistry | None,
-    ) -> tuple[Message, ...]:
+        task_plan: TaskPlan | None,
+        existing_context_state: ContextManagementState | None,
+        context_manager: ContextManagerProtocol | None,
+        prefix_messages: tuple[Message, ...] = (),
+    ) -> tuple[tuple[Message, ...], ContextManagementState | None]:
         model_messages = messages
         if enable_repository_context and repository_context_builder is not None:
             repository_context = repository_context_builder.build(
@@ -473,7 +556,15 @@ class AgentRuntime:
         skill_catalog_message = self._build_skill_catalog_message(skill_registry)
         if skill_catalog_message is not None:
             model_messages = (skill_catalog_message, *model_messages)
-        return model_messages
+        if prefix_messages:
+            model_messages = (*prefix_messages, *model_messages)
+        if context_manager is None:
+            return model_messages, existing_context_state
+        return context_manager.prepare_messages(
+            messages=model_messages,
+            task_plan=task_plan,
+            existing_state=existing_context_state,
+        )
 
     def _build_skill_catalog_message(self, skill_registry: SkillRegistry | None) -> Message | None:
         if skill_registry is None:
@@ -733,9 +824,11 @@ class _TaskRunResult:
         next_step: int,
         final_message: Message | None,
         error: str | None,
+        context_state: ContextManagementState | None,
     ) -> None:
         self.messages = messages
         self.trace = trace
         self.next_step = next_step
         self.final_message = final_message
         self.error = error
+        self.context_state = context_state
