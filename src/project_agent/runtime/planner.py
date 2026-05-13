@@ -119,8 +119,6 @@ def _build_planning_messages(
                 "description, and optional dependencies. Use statuses only when "
                 "needed; default status is pending. If the request is simple "
                 "and does not require multiple steps, return a single task."
-                "Please note that if the user's request involves significant complex changes,"
-                "please add review and fix tasks to the execution plan to ensure the plan's correctness and executability."
                 f"{skill_catalog_section}"
             ),
         ),

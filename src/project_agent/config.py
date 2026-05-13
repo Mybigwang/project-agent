@@ -105,7 +105,7 @@ def load_settings(
     max_steps = int(
         override_values.get(
             "max_steps",
-            os.getenv("PROJECT_AGENT_MAX_STEPS", config_values.get("max_steps", "8")),
+            os.getenv("PROJECT_AGENT_MAX_STEPS", config_values.get("max_steps", "24")),
         )
     )
     stream_output = _parse_bool(
