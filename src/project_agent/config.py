@@ -55,6 +55,13 @@ class Settings:
     enable_auto_compaction: bool
     enable_full_compaction: bool
     repository_context_max_tokens: int
+    memory_enabled: bool
+    memory_dir: Path
+    memory_entrypoint_max_lines: int
+    memory_entrypoint_max_bytes: int
+    memory_max_relevant_files: int
+    memory_max_relevant_file_chars: int
+    memory_max_manifest_files: int
 
 
 def load_settings(
@@ -385,6 +392,67 @@ def load_settings(
             ),
         )
     )
+    memory_enabled = _parse_bool(
+        override_values.get(
+            "memory_enabled",
+            os.getenv("PROJECT_AGENT_MEMORY_ENABLED", config_values.get("memory_enabled", "true")),
+        )
+    )
+    memory_dir = _parse_path(
+        override_values.get(
+            "memory_dir",
+            os.getenv(
+                "PROJECT_AGENT_MEMORY_DIR",
+                config_values.get("memory_dir", str(workspace_root / ".project_agent" / "memory")),
+            ),
+        ),
+        workspace_root=workspace_root,
+    )
+    memory_entrypoint_max_lines = int(
+        override_values.get(
+            "memory_entrypoint_max_lines",
+            os.getenv(
+                "PROJECT_AGENT_MEMORY_ENTRYPOINT_MAX_LINES",
+                config_values.get("memory_entrypoint_max_lines", "200"),
+            ),
+        )
+    )
+    memory_entrypoint_max_bytes = int(
+        override_values.get(
+            "memory_entrypoint_max_bytes",
+            os.getenv(
+                "PROJECT_AGENT_MEMORY_ENTRYPOINT_MAX_BYTES",
+                config_values.get("memory_entrypoint_max_bytes", "25000"),
+            ),
+        )
+    )
+    memory_max_relevant_files = int(
+        override_values.get(
+            "memory_max_relevant_files",
+            os.getenv(
+                "PROJECT_AGENT_MEMORY_MAX_RELEVANT_FILES",
+                config_values.get("memory_max_relevant_files", "3"),
+            ),
+        )
+    )
+    memory_max_relevant_file_chars = int(
+        override_values.get(
+            "memory_max_relevant_file_chars",
+            os.getenv(
+                "PROJECT_AGENT_MEMORY_MAX_RELEVANT_FILE_CHARS",
+                config_values.get("memory_max_relevant_file_chars", "3000"),
+            ),
+        )
+    )
+    memory_max_manifest_files = int(
+        override_values.get(
+            "memory_max_manifest_files",
+            os.getenv(
+                "PROJECT_AGENT_MEMORY_MAX_MANIFEST_FILES",
+                config_values.get("memory_max_manifest_files", "50"),
+            ),
+        )
+    )
 
     _validate_log_level(log_level)
     _validate_max_steps(max_steps)
@@ -410,6 +478,12 @@ def load_settings(
     _validate_positive_int(context_tool_result_preview_chars, "context_tool_result_preview_chars")
     _validate_positive_int(context_summary_max_tokens, "context_summary_max_tokens")
     _validate_positive_int(repository_context_max_tokens, "repository_context_max_tokens")
+    _validate_positive_int(memory_entrypoint_max_lines, "memory_entrypoint_max_lines")
+    _validate_positive_int(memory_entrypoint_max_bytes, "memory_entrypoint_max_bytes")
+    _validate_positive_int(memory_max_relevant_files, "memory_max_relevant_files")
+    _validate_positive_int(memory_max_relevant_file_chars, "memory_max_relevant_file_chars")
+    _validate_positive_int(memory_max_manifest_files, "memory_max_manifest_files")
+    _validate_path_within_workspace(memory_dir, workspace_root, "memory_dir")
     _validate_non_empty_string(context_profile, "context_profile")
     _validate_non_empty_string(context_profile_version, "context_profile_version")
 
@@ -455,6 +529,13 @@ def load_settings(
         enable_auto_compaction=enable_auto_compaction,
         enable_full_compaction=enable_full_compaction,
         repository_context_max_tokens=repository_context_max_tokens,
+        memory_enabled=memory_enabled,
+        memory_dir=memory_dir,
+        memory_entrypoint_max_lines=memory_entrypoint_max_lines,
+        memory_entrypoint_max_bytes=memory_entrypoint_max_bytes,
+        memory_max_relevant_files=memory_max_relevant_files,
+        memory_max_relevant_file_chars=memory_max_relevant_file_chars,
+        memory_max_manifest_files=memory_max_manifest_files,
     )
 
 
@@ -492,7 +573,11 @@ def _parse_optional_path(value: str, *, workspace_root: Path) -> Path | None:
     normalized = value.strip()
     if not normalized:
         return None
-    path = Path(normalized)
+    return _parse_path(normalized, workspace_root=workspace_root)
+
+
+def _parse_path(value: str, *, workspace_root: Path) -> Path:
+    path = Path(value)
     if not path.is_absolute():
         path = workspace_root / path
     return path.resolve()
@@ -533,3 +618,10 @@ def _validate_ratio(value: float, key: str) -> None:
 def _validate_non_empty_string(value: str, key: str) -> None:
     if not value.strip():
         raise ConfigurationError(f"{key} must be a non-empty string")
+
+
+def _validate_path_within_workspace(path: Path, workspace_root: Path, key: str) -> None:
+    try:
+        path.relative_to(workspace_root)
+    except ValueError as error:
+        raise ConfigurationError(f"{key} must be within workspace_root") from error

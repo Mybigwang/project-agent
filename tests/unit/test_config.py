@@ -46,6 +46,13 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PROJECT_AGENT_ENABLE_AUTO_COMPACTION", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_ENABLE_FULL_COMPACTION", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_REPOSITORY_CONTEXT_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_MEMORY_ENABLED", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_MEMORY_DIR", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_MEMORY_ENTRYPOINT_MAX_LINES", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_MEMORY_ENTRYPOINT_MAX_BYTES", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_MEMORY_MAX_RELEVANT_FILES", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_MEMORY_MAX_RELEVANT_FILE_CHARS", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_MEMORY_MAX_MANIFEST_FILES", raising=False)
 
     settings = load_settings()
 
@@ -54,7 +61,7 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.model_base_url is None
     assert settings.model_api_key is None
     assert settings.environment == "development"
-    assert settings.max_steps == 8
+    assert settings.max_steps == 24
     assert settings.stream_output is False
     assert settings.command_timeout_seconds == 30.0
     assert settings.max_command_output_chars == 4000
@@ -88,6 +95,13 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.enable_auto_compaction is True
     assert settings.enable_full_compaction is True
     assert settings.repository_context_max_tokens == 6000
+    assert settings.memory_enabled is True
+    assert settings.memory_dir == (settings.workspace_root / ".project_agent" / "memory").resolve()
+    assert settings.memory_entrypoint_max_lines == 200
+    assert settings.memory_entrypoint_max_bytes == 25000
+    assert settings.memory_max_relevant_files == 3
+    assert settings.memory_max_relevant_file_chars == 3000
+    assert settings.memory_max_manifest_files == 50
 
 
 def test_load_settings_honors_override_precedence(
@@ -533,4 +547,88 @@ def test_load_settings_rejects_blank_context_identity_fields(tmp_path: Path, fie
     )
 
     with pytest.raises(ConfigurationError, match=f"{field_name} must be a non-empty string"):
+        load_settings(config_path=config_path)
+
+
+def test_load_settings_honors_memory_override_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    workspace_root = tmp_path / "workspace"
+    config_path.write_text(
+        (
+            "[project_agent]\n"
+            "memory_enabled = false\n"
+            "memory_dir = '.project_agent/config-memory'\n"
+            "memory_entrypoint_max_lines = 10\n"
+            "memory_entrypoint_max_bytes = 100\n"
+            "memory_max_relevant_files = 1\n"
+            "memory_max_relevant_file_chars = 200\n"
+            "memory_max_manifest_files = 3\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROJECT_AGENT_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("PROJECT_AGENT_MEMORY_ENABLED", "true")
+    monkeypatch.setenv("PROJECT_AGENT_MEMORY_DIR", ".project_agent/env-memory")
+    monkeypatch.setenv("PROJECT_AGENT_MEMORY_ENTRYPOINT_MAX_LINES", "20")
+    monkeypatch.setenv("PROJECT_AGENT_MEMORY_ENTRYPOINT_MAX_BYTES", "300")
+    monkeypatch.setenv("PROJECT_AGENT_MEMORY_MAX_RELEVANT_FILES", "2")
+    monkeypatch.setenv("PROJECT_AGENT_MEMORY_MAX_RELEVANT_FILE_CHARS", "400")
+    monkeypatch.setenv("PROJECT_AGENT_MEMORY_MAX_MANIFEST_FILES", "5")
+
+    settings = load_settings(
+        config_path=config_path,
+        overrides={
+            "memory_enabled": "false",
+            "memory_dir": ".project_agent/cli-memory",
+            "memory_entrypoint_max_lines": "30",
+            "memory_entrypoint_max_bytes": "500",
+            "memory_max_relevant_files": "4",
+            "memory_max_relevant_file_chars": "600",
+            "memory_max_manifest_files": "7",
+        },
+    )
+
+    assert settings.memory_enabled is False
+    assert settings.memory_dir == (workspace_root / ".project_agent" / "cli-memory").resolve()
+    assert settings.memory_entrypoint_max_lines == 30
+    assert settings.memory_entrypoint_max_bytes == 500
+    assert settings.memory_max_relevant_files == 4
+    assert settings.memory_max_relevant_file_chars == 600
+    assert settings.memory_max_manifest_files == 7
+
+
+@pytest.mark.parametrize(
+    ("config_line", "error_message"),
+    [
+        ("memory_entrypoint_max_lines = 0\n", "memory_entrypoint_max_lines must be >= 1"),
+        ("memory_entrypoint_max_bytes = 0\n", "memory_entrypoint_max_bytes must be >= 1"),
+        ("memory_max_relevant_files = 0\n", "memory_max_relevant_files must be >= 1"),
+        ("memory_max_relevant_file_chars = 0\n", "memory_max_relevant_file_chars must be >= 1"),
+        ("memory_max_manifest_files = 0\n", "memory_max_manifest_files must be >= 1"),
+    ],
+)
+def test_load_settings_rejects_non_positive_memory_limits(
+    tmp_path: Path,
+    config_line: str,
+    error_message: str,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(f"[project_agent]\n{config_line}", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match=error_message):
+        load_settings(config_path=config_path)
+
+
+def test_load_settings_rejects_memory_dir_outside_workspace(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    outside = tmp_path / "outside"
+    config_path.write_text(
+        f"[project_agent]\nworkspace_root = 'workspace'\nmemory_dir = '{outside}'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="memory_dir must be within workspace_root"):
         load_settings(config_path=config_path)

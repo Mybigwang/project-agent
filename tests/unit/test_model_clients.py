@@ -10,7 +10,10 @@ import pytest
 import project_agent.runtime.model_clients as model_clients
 from project_agent.core.types import Message, SkillCall, ToolCall
 from project_agent.errors import AgentError
-from project_agent.runtime.model_clients import OpenAICompatibleModelClient
+from project_agent.runtime.model_clients import (
+    MockModelClient,
+    OpenAICompatibleModelClient,
+)
 
 
 @dataclass(frozen=True)
@@ -162,6 +165,30 @@ def _make_client(monkeypatch: pytest.MonkeyPatch) -> OpenAICompatibleModelClient
     )
 
 
+def test_mock_model_client_selects_memory_files_from_manifest() -> None:
+    response = MockModelClient().complete(
+        messages=(
+            Message(
+                role="system",
+                content="Return JSON only in this exact shape",
+            ),
+            Message(
+                role="user",
+                content=(
+                    "User input:\nexplain auth\n\n"
+                    "Maximum files: 3\n\n"
+                    "Memory manifest:\n"
+                    "- path: auth.md\n  title: Auth\n  description: OAuth decisions\n"
+                    "- path: billing.md\n  title: Billing\n  description: invoices"
+                ),
+            ),
+        ),
+        tools=(),
+    )
+
+    assert response == Message(role="assistant", content='{"files": ["auth.md"]}')
+
+
 def test_openai_compatible_model_client_posts_chat_completions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -173,7 +200,9 @@ def test_openai_compatible_model_client_posts_chat_completions(
     )
 
     assert response == Message(role="assistant", content="real response")
-    assert _FakeConnection.captured["init"]["base_url"].connection_host == "93.184.216.34"
+    assert (
+        _FakeConnection.captured["init"]["base_url"].connection_host == "93.184.216.34"
+    )
     assert _FakeConnection.captured["init"]["timeout"] == 600.0
     assert _FakeConnection.captured["method"] == "POST"
     assert _FakeConnection.captured["path"] == "/v1/chat/completions"
@@ -201,12 +230,16 @@ def test_openai_compatible_model_client_streams_content_chunks(
         )
     )
     client = _make_client(monkeypatch)
+    streamed_chunks: list[str] = []
 
-    chunks = tuple(
-        client.stream_complete(messages=(Message(role="user", content="hello"),), tools=())
+    response = client.complete(
+        messages=(Message(role="user", content="hello"),),
+        tools=(),
+        stream_callback=streamed_chunks.append,
     )
 
-    assert chunks == ("hello", " world")
+    assert response == Message(role="assistant", content="hello world")
+    assert streamed_chunks == ["hello", " world"]
     assert _FakeConnection.captured["body"] == {
         "model": "test-model",
         "messages": [{"role": "user", "content": "hello"}],
@@ -258,7 +291,11 @@ def test_openai_compatible_model_client_stream_sanitizes_http_error(
     client = _make_client(monkeypatch)
 
     with pytest.raises(AgentError) as error:
-        tuple(client.stream_complete(messages=(Message(role="user", content="hello"),), tools=()))
+        tuple(
+            client.stream_complete(
+                messages=(Message(role="user", content="hello"),), tools=()
+            )
+        )
 
     assert str(error.value) == "model request failed with HTTP 524"
     assert "test-key" not in str(error.value)
@@ -271,7 +308,11 @@ def test_openai_compatible_model_client_stream_sanitizes_network_error(
     client = _make_client(monkeypatch)
 
     with pytest.raises(AgentError) as error:
-        tuple(client.stream_complete(messages=(Message(role="user", content="hello"),), tools=()))
+        tuple(
+            client.stream_complete(
+                messages=(Message(role="user", content="hello"),), tools=()
+            )
+        )
 
     assert str(error.value) == "model request failed due to a network error"
     assert "internal proxy details" not in str(error.value)
@@ -284,7 +325,11 @@ def test_openai_compatible_model_client_stream_rejects_invalid_json_event(
     client = _make_client(monkeypatch)
 
     with pytest.raises(AgentError, match="valid JSON"):
-        tuple(client.stream_complete(messages=(Message(role="user", content="hello"),), tools=()))
+        tuple(
+            client.stream_complete(
+                messages=(Message(role="user", content="hello"),), tools=()
+            )
+        )
 
 
 def test_openai_compatible_model_client_stream_rejects_missing_delta(
@@ -296,7 +341,11 @@ def test_openai_compatible_model_client_stream_rejects_missing_delta(
     client = _make_client(monkeypatch)
 
     with pytest.raises(AgentError, match="missing delta"):
-        tuple(client.stream_complete(messages=(Message(role="user", content="hello"),), tools=()))
+        tuple(
+            client.stream_complete(
+                messages=(Message(role="user", content="hello"),), tools=()
+            )
+        )
 
 
 def test_openai_compatible_model_client_adds_tool_choice_when_tools_present(
@@ -338,7 +387,9 @@ def test_openai_compatible_model_client_serializes_tool_call_messages(
                 role="assistant",
                 content="",
                 tool_calls=(
-                    ToolCall(name="echo", arguments={"content": "ping"}, call_id="call_123"),
+                    ToolCall(
+                        name="echo", arguments={"content": "ping"}, call_id="call_123"
+                    ),
                 ),
             ),
             Message(role="tool", content="echo: ping", tool_call_id="call_123"),
@@ -376,7 +427,9 @@ def test_openai_compatible_model_client_serializes_tool_call_message_content(
                 role="assistant",
                 content="calling echo",
                 tool_calls=(
-                    ToolCall(name="echo", arguments={"content": "ping"}, call_id="call_123"),
+                    ToolCall(
+                        name="echo", arguments={"content": "ping"}, call_id="call_123"
+                    ),
                 ),
             ),
         ),
@@ -400,7 +453,10 @@ def test_openai_compatible_model_client_rejects_tool_call_with_content(
                         {
                             "id": "call_123",
                             "type": "function",
-                            "function": {"name": "echo", "arguments": '{"content": "ping"}'},
+                            "function": {
+                                "name": "echo",
+                                "arguments": '{"content": "ping"}',
+                            },
                         }
                     ],
                 }
@@ -444,7 +500,9 @@ def test_openai_compatible_model_client_parses_tool_call(
         tools=(_ToolStub(),),
     )
 
-    assert response == (ToolCall(name="echo", arguments={"content": "ping"}, call_id="call_123"),)
+    assert response == (
+        ToolCall(name="echo", arguments={"content": "ping"}, call_id="call_123"),
+    )
 
 
 def test_openai_compatible_model_client_parses_multiple_tool_calls(
@@ -493,6 +551,7 @@ def test_openai_compatible_model_client_parses_multiple_tool_calls(
         ),
     )
 
+
 def test_openai_compatible_model_client_rejects_duplicate_tool_call_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -505,12 +564,18 @@ def test_openai_compatible_model_client_rejects_duplicate_tool_call_ids(
                         {
                             "id": "call_1",
                             "type": "function",
-                            "function": {"name": "read_file", "arguments": '{"path": "a"}'},
+                            "function": {
+                                "name": "read_file",
+                                "arguments": '{"path": "a"}',
+                            },
                         },
                         {
                             "id": "call_1",
                             "type": "function",
-                            "function": {"name": "write_file", "arguments": '{"path": "b"}'},
+                            "function": {
+                                "name": "write_file",
+                                "arguments": '{"path": "b"}',
+                            },
                         },
                     ],
                 }
@@ -540,7 +605,9 @@ def test_openai_compatible_model_client_rejects_too_many_tool_calls(
                             "type": "function",
                             "function": {"name": "echo", "arguments": "{}"},
                         }
-                        for index in range(model_clients.MAX_TOOL_CALLS_PER_RESPONSE + 1)
+                        for index in range(
+                            model_clients.MAX_TOOL_CALLS_PER_RESPONSE + 1
+                        )
                     ],
                 }
             }
@@ -594,7 +661,9 @@ def test_openai_compatible_model_client_rejects_malformed_tool_calls(
         "function": {"name": "echo", "arguments": '{"content": "ping"}'},
     }
     _FakeConnection.payload = {
-        "choices": [{"message": {"role": "assistant", "tool_calls": [tool_call, tool_call]}}]
+        "choices": [
+            {"message": {"role": "assistant", "tool_calls": [tool_call, tool_call]}}
+        ]
     }
     client = _make_client(monkeypatch)
 
@@ -740,9 +809,9 @@ def test_openai_compatible_model_client_uses_later_public_dns_result(
 
     client.complete(messages=(Message(role="user", content="hello"),), tools=())
 
-    assert _FakeConnection.captured["init"]["base_url"].connection_host == "93.184.216.34"
-
-
+    assert (
+        _FakeConnection.captured["init"]["base_url"].connection_host == "93.184.216.34"
+    )
 
 
 def test_openai_compatible_model_client_stream_parses_skill_call_without_streaming_raw_json(
@@ -777,6 +846,30 @@ def test_openai_compatible_model_client_stream_parses_skill_call_without_streami
     assert streamed_chunks == []
 
 
+def test_openai_compatible_model_client_streams_json_when_not_skill_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeConnection.raw_body = _stream_body_from_events(
+        (
+            _stream_event({"choices": [{"delta": {"content": '{"foo"'}}]}),
+            _stream_event({"choices": [{"delta": {"content": ':"bar"}'}}]}),
+            "data: [DONE]\n\n",
+        )
+    )
+    client = _make_client(monkeypatch)
+    streamed_chunks: list[str] = []
+
+    response = client.complete(
+        messages=(Message(role="user", content="show json"),),
+        tools=(),
+        stream_callback=streamed_chunks.append,
+    )
+
+    assert response == Message(role="assistant", content='{"foo":"bar"}')
+    assert streamed_chunks == ['{"foo"', ':"bar"}']
+
+
+
 def test_openai_compatible_model_client_preserves_plain_text_when_skill_payload_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -792,7 +885,9 @@ def test_openai_compatible_model_client_preserves_plain_text_when_skill_payload_
     }
     client = _make_client(monkeypatch)
 
-    response = client.complete(messages=(Message(role="user", content="review this"),), tools=())
+    response = client.complete(
+        messages=(Message(role="user", content="review this"),), tools=()
+    )
 
     assert response == Message(
         role="assistant",

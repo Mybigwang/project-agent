@@ -8,8 +8,13 @@ import typer
 
 from project_agent import __version__
 from project_agent.config import Settings, load_settings
-from project_agent.core.interfaces import ModelClient, RepositoryContextBuilderProtocol, Tool
-from project_agent.core.types import AgentTraceStep, Message, TaskPlan
+from project_agent.core.interfaces import (
+    MemoryContextBuilderProtocol,
+    ModelClient,
+    RepositoryContextBuilderProtocol,
+    Tool,
+)
+from project_agent.core.types import AgentTraceStep, MemoryContext, Message, TaskPlan
 from project_agent.errors import AgentError, map_exception_to_exit_code
 from project_agent.logging import configure_logging
 from project_agent.runtime.agent import AgentRuntime
@@ -21,7 +26,15 @@ from project_agent.runtime.context_management import (
     HeuristicTokenEstimator,
     MicroCompactor,
 )
-from project_agent.runtime.model_clients import MockModelClient, OpenAICompatibleModelClient
+from project_agent.runtime.memory import (
+    FileMemoryStore,
+    MemoryContextBuilder,
+    ModelMemoryRecall,
+)
+from project_agent.runtime.model_clients import (
+    MockModelClient,
+    OpenAICompatibleModelClient,
+)
 from project_agent.runtime.permissions import PermissionPolicy
 from project_agent.runtime.permissions.policy import load_permission_rules
 from project_agent.runtime.permissions.types import PermissionRule
@@ -85,6 +98,8 @@ def doctor(ctx: typer.Context) -> None:
     typer.echo(f"model_base_url={settings.model_base_url or ''}")
     typer.echo(f"model_api_key_configured={settings.model_api_key is not None}")
     typer.echo(f"environment={settings.environment}")
+    typer.echo(f"memory_enabled={settings.memory_enabled}")
+    typer.echo(f"memory_dir={settings.memory_dir}")
 
 
 @app.command()
@@ -133,6 +148,7 @@ def run(
             allow_command_substitution=settings.skills_allow_command_substitution
         ),
     )
+    memory_context_builder = _build_memory_context_builder(settings)
     context_manager = ContextManager(
         budget_estimator=HeuristicTokenEstimator(),
         micro_compactor=MicroCompactor(
@@ -173,6 +189,7 @@ def run(
             max_steps=active_max_steps,
             repository_context_builder=repository_context_builder,
             enable_repository_context=settings.enable_repository_context,
+            memory_context_builder=memory_context_builder,
             skill_registry=skill_registry,
             skill_preprocessor=skill_preprocessor,
             permission_policy=permission_policy,
@@ -199,6 +216,7 @@ def run(
             max_steps=active_max_steps,
             repository_context_builder=repository_context_builder,
             enable_repository_context=settings.enable_repository_context,
+            memory_context_builder=memory_context_builder,
             skill_registry=skill_registry,
             skill_preprocessor=skill_preprocessor,
             permission_policy=permission_policy,
@@ -240,6 +258,7 @@ def _run_once(
     max_steps: int,
     repository_context_builder: RepositoryContextBuilderProtocol,
     enable_repository_context: bool,
+    memory_context_builder: MemoryContextBuilderProtocol | None,
     skill_registry: SkillRegistry,
     skill_preprocessor: SkillPromptPreprocessor,
     permission_policy: PermissionPolicy,
@@ -256,13 +275,13 @@ def _run_once(
         sys.stdout.flush()
 
     def notification_callback(message: str) -> None:
-        if not stream_output:
-            return
         sys.stdout.write(f"{_sanitize_cli_text(message)}\n")
         sys.stdout.flush()
 
     def approval_callback(message: str) -> bool:
-        return typer.confirm(f"Approve action? {_sanitize_cli_text(message)}", default=False)
+        return typer.confirm(
+            f"Approve action? {_sanitize_cli_text(message)}", default=False
+        )
 
     cmd, actual_input = _parse_command(user_input)
 
@@ -291,6 +310,7 @@ def _run_once(
         max_steps=max_steps,
         repository_context_builder=repository_context_builder,
         enable_repository_context=enable_repository_context,
+        memory_context_builder=memory_context_builder,
         planner=planner,
         stream_callback=stream_callback if stream_output else None,
         notification_callback=notification_callback,
@@ -316,6 +336,14 @@ def _echo_streamed_output(message: Message) -> None:
     typer.echo(_sanitize_final_output(message.content))
 
 
+def _echo_memory_recall(memory_context: MemoryContext | None) -> None:
+    if memory_context is None or not memory_context.relevant_files:
+        return
+    typer.echo("Memory recall:")
+    for file in memory_context.relevant_files:
+        typer.echo(f"  - {_sanitize_cli_text(file.relative_path)}")
+
+
 def _echo_task_progress(task_plan: TaskPlan | None) -> None:
     if task_plan is None:
         return
@@ -326,7 +354,11 @@ def _echo_task_progress(task_plan: TaskPlan | None) -> None:
 
 def _echo_trace(trace: tuple[AgentTraceStep, ...]) -> None:
     for step in trace:
-        if step.event == "task" and step.task_id is not None and step.task_status is not None:
+        if (
+            step.event == "task"
+            and step.task_id is not None
+            and step.task_status is not None
+        ):
             status = "error" if step.is_error else "ok"
             typer.echo(
                 f"[step {step.step}] task {step.task_id} "
@@ -345,7 +377,9 @@ def _sanitize_final_output(value: str) -> str:
 
 
 def _sanitize_cli_text(value: str) -> str:
-    return CONTROL_CHAR_PATTERN.sub("?", value).replace("\r", "\\r").replace("\n", "\\n")
+    return (
+        CONTROL_CHAR_PATTERN.sub("?", value).replace("\r", "\\r").replace("\n", "\\n")
+    )
 
 
 def _build_model_client(settings: Settings) -> ModelClient:
@@ -362,13 +396,29 @@ def _build_model_client(settings: Settings) -> ModelClient:
     )
 
 
+def _build_memory_context_builder(settings: Settings) -> MemoryContextBuilder | None:
+    if not settings.memory_enabled:
+        return None
+    return MemoryContextBuilder(
+        store=FileMemoryStore(memory_dir=settings.memory_dir),
+        recall=ModelMemoryRecall(model_client=_build_model_client(settings)),
+        entrypoint_max_lines=settings.memory_entrypoint_max_lines,
+        entrypoint_max_bytes=settings.memory_entrypoint_max_bytes,
+        max_relevant_files=settings.memory_max_relevant_files,
+        max_relevant_file_chars=settings.memory_max_relevant_file_chars,
+        max_manifest_files=settings.memory_max_manifest_files,
+    )
+
+
 def _build_skill_registry(settings: Settings) -> SkillRegistry:
     builtin_root = None
     if settings.skills_enabled and settings.skills_builtin_enabled:
         builtin_root = Path(__file__).resolve().parent / "skills" / "builtin"
     project_root = settings.project_skills_dir if settings.skills_enabled else None
     user_root = settings.user_skills_dir if settings.skills_enabled else None
-    skills = load_skills(builtin_root=builtin_root, user_root=user_root, project_root=project_root)
+    skills = load_skills(
+        builtin_root=builtin_root, user_root=user_root, project_root=project_root
+    )
     return SkillRegistry(skills)
 
 

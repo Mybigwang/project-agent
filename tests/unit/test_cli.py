@@ -7,9 +7,9 @@ from typer.testing import CliRunner
 import project_agent.cli as cli_module
 from project_agent.cli import app
 from project_agent.config import Settings
-from project_agent.runtime.permissions import PermissionMode
 from project_agent.core.types import AgentTraceStep, Message, SkillCall, Task, TaskPlan
 from project_agent.errors import AgentError, ConfigurationError
+from project_agent.runtime.permissions import PermissionMode
 
 runner = CliRunner()
 
@@ -63,6 +63,13 @@ def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "enable_auto_compaction": True,
         "enable_full_compaction": True,
         "repository_context_max_tokens": 6000,
+        "memory_enabled": True,
+        "memory_dir": tmp_path / ".project_agent" / "memory",
+        "memory_entrypoint_max_lines": 200,
+        "memory_entrypoint_max_bytes": 25000,
+        "memory_max_relevant_files": 3,
+        "memory_max_relevant_file_chars": 3000,
+        "memory_max_manifest_files": 50,
         **overrides,
     }
     return Settings(**values)
@@ -72,7 +79,10 @@ def test_console_script_points_to_main_entry() -> None:
     pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
 
-    assert pyproject["project"]["scripts"]["project-agent"] == "project_agent.cli:main_entry"
+    assert (
+        pyproject["project"]["scripts"]["project-agent"]
+        == "project_agent.cli:main_entry"
+    )
 
 
 def test_help_command_succeeds() -> None:
@@ -88,6 +98,11 @@ def test_doctor_command_uses_cli_overrides(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert f"workspace_root={tmp_path.resolve()}" in result.stdout
     assert "model_api_key_configured=False" in result.stdout
+    assert "memory_enabled=True" in result.stdout
+    assert (
+        f"memory_dir={(tmp_path / '.project_agent' / 'memory').resolve()}"
+        in result.stdout
+    )
 
 
 def test_run_command_executes_runtime(tmp_path: Path) -> None:
@@ -103,7 +118,14 @@ def test_run_command_executes_runtime(tmp_path: Path) -> None:
 def test_run_command_prints_trace_output(tmp_path: Path) -> None:
     result = runner.invoke(
         app,
-        ["--workspace-root", str(tmp_path), "run", "--prompt", "use tool ping", "--trace"],
+        [
+            "--workspace-root",
+            str(tmp_path),
+            "run",
+            "--prompt",
+            "use tool ping",
+            "--trace",
+        ],
     )
 
     assert result.exit_code == 0
@@ -226,7 +248,9 @@ def test_run_command_uses_settings_stream_output_when_stream_flag_absent(
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
-        cli_module, "load_settings", lambda **_: _make_settings(tmp_path, stream_output=True)
+        cli_module,
+        "load_settings",
+        lambda **_: _make_settings(tmp_path, stream_output=True),
     )
 
     def fake_run_once(**kwargs: object) -> None:
@@ -293,11 +317,118 @@ def test_run_command_passes_max_steps_override_to_runtime(
 
     result = runner.invoke(
         app,
-        ["--workspace-root", str(tmp_path), "run", "--prompt", "hello", "--max-steps", "3"],
+        [
+            "--workspace-root",
+            str(tmp_path),
+            "run",
+            "--prompt",
+            "hello",
+            "--max-steps",
+            "3",
+        ],
     )
 
     assert result.exit_code == 0
     assert captured["max_steps"] == 3
+
+
+def test_run_command_passes_memory_builder_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    settings = _make_settings(tmp_path, memory_enabled=True)
+    monkeypatch.setattr(cli_module, "load_settings", lambda **_: settings)
+
+    def fake_run_once(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "_run_once", fake_run_once)
+
+    result = runner.invoke(
+        app, ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"]
+    )
+
+    assert result.exit_code == 0
+    builder = captured["memory_context_builder"]
+    assert builder is not None
+    assert hasattr(builder, "build")
+
+
+def test_run_command_skips_memory_builder_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    settings = _make_settings(tmp_path, memory_enabled=False)
+    monkeypatch.setattr(cli_module, "load_settings", lambda **_: settings)
+
+    def fake_run_once(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "_run_once", fake_run_once)
+
+    result = runner.invoke(
+        app, ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"]
+    )
+
+    assert result.exit_code == 0
+    assert captured["memory_context_builder"] is None
+
+
+def test_run_command_prints_memory_recall(tmp_path: Path) -> None:
+    memory_dir = tmp_path / ".project_agent" / "memory"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "MEMORY.md").write_text(
+        "- [Auth](auth.md) — OAuth decisions", encoding="utf-8"
+    )
+    (memory_dir / "auth.md").write_text("# Auth\n\nOAuth decisions", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["--workspace-root", str(tmp_path), "run", "--prompt", "explain auth"],
+    )
+
+    assert result.exit_code == 0
+    assert "Memory recall:\n  - auth.md\n" in result.stdout
+
+
+
+def test_run_command_stream_prints_memory_recall_before_final_output(tmp_path: Path) -> None:
+    memory_dir = tmp_path / ".project_agent" / "memory"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "MEMORY.md").write_text(
+        "- [Auth](auth.md) — OAuth decisions", encoding="utf-8"
+    )
+    (memory_dir / "auth.md").write_text("# Auth\n\nOAuth decisions", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["--workspace-root", str(tmp_path), "run", "--prompt", "explain auth", "--stream"],
+    )
+
+    assert result.exit_code == 0
+    assert "Memory recall:\n  - auth.md\nMock response" in result.stdout
+
+
+
+def test_build_memory_context_builder_default_recall_selects_topic_file(
+    tmp_path: Path,
+) -> None:
+    memory_dir = tmp_path / ".project_agent" / "memory"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "MEMORY.md").write_text(
+        "- [Auth](auth.md) — OAuth decisions", encoding="utf-8"
+    )
+    (memory_dir / "auth.md").write_text("# Auth\n\nOAuth decisions", encoding="utf-8")
+    settings = _make_settings(tmp_path, memory_dir=memory_dir)
+
+    builder = cli_module._build_memory_context_builder(settings)
+
+    assert builder is not None
+    context = builder.build(user_input="explain auth")
+    assert tuple(file.relative_path for file in context.relevant_files) == ("auth.md",)
+    assert "## Relevant memory: auth.md" in context.prompt
 
 
 def test_run_command_uses_session_history(tmp_path: Path) -> None:
@@ -364,8 +495,6 @@ def test_run_command_reports_unknown_skill_command(tmp_path: Path) -> None:
     assert "Unknown command: /missing" in result.stdout
 
 
-
-
 def test_run_command_streaming_shows_skill_notification(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -407,7 +536,14 @@ def test_run_command_streaming_shows_skill_notification(
 
     result = runner.invoke(
         app,
-        ["--workspace-root", str(tmp_path), "run", "--prompt", "please review", "--stream"],
+        [
+            "--workspace-root",
+            str(tmp_path),
+            "run",
+            "--prompt",
+            "please review",
+            "--stream",
+        ],
     )
 
     assert result.exit_code == 0
@@ -450,7 +586,9 @@ def test_run_command_passes_repository_context_settings_to_runtime(
 
     monkeypatch.setattr(cli_module, "_run_once", fake_run_once)
 
-    result = runner.invoke(app, ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"])
+    result = runner.invoke(
+        app, ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"]
+    )
 
     assert result.exit_code == 0
     assert captured["enable_repository_context"] is False
@@ -468,7 +606,9 @@ def test_run_command_passes_repository_context_settings_to_runtime(
 def test_task_progress_and_trace_sanitize_control_characters(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    task_plan = TaskPlan(tasks=(Task(id="task_1", title="bad\x1b[31m\r\ntext", description="bad"),))
+    task_plan = TaskPlan(
+        tasks=(Task(id="task_1", title="bad\x1b[31m\r\ntext", description="bad"),)
+    )
     trace = (
         AgentTraceStep(
             step=1,

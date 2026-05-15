@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
 from project_agent.core.interfaces import (
     ContextManagerProtocol,
+    MemoryContextBuilderProtocol,
     ModelClient,
     Planner,
     RepositoryContextBuilderProtocol,
@@ -15,6 +17,7 @@ from project_agent.core.interfaces import (
 from project_agent.core.types import (
     AgentTraceStep,
     ContextManagementState,
+    MemoryContext,
     Message,
     RunResult,
     SessionState,
@@ -26,11 +29,20 @@ from project_agent.core.types import (
 )
 from project_agent.errors import AgentError, RuntimeLimitError
 from project_agent.runtime.model_clients import MAX_TOOL_CALLS_PER_RESPONSE
-from project_agent.runtime.permissions import PermissionDecision, PermissionPolicy, PermissionRequest
+from project_agent.runtime.permissions import (
+    PermissionDecision,
+    PermissionPolicy,
+    PermissionRequest,
+)
 from project_agent.runtime.tool_registry import ToolRegistry
-from project_agent.skills import SkillPromptPreprocessor, SkillRegistry, build_skill_invocation
+from project_agent.skills import (
+    SkillPromptPreprocessor,
+    SkillRegistry,
+    build_skill_invocation,
+)
 from project_agent.skills.errors import SkillError
 
+LOGGER = logging.getLogger(__name__)
 MAX_SKILL_CALLS_PER_TURN = 1
 NotificationCallback = Callable[[str], None]
 ApprovalCallback = Callable[[str], bool]
@@ -49,6 +61,7 @@ class AgentRuntime:
         max_steps: int,
         repository_context_builder: RepositoryContextBuilderProtocol | None = None,
         enable_repository_context: bool = True,
+        memory_context_builder: MemoryContextBuilderProtocol | None = None,
         planner: Planner | None = None,
         context_manager: ContextManagerProtocol | None = None,
         stream_callback: Callable[[str], None] | None = None,
@@ -62,6 +75,15 @@ class AgentRuntime:
         history = state.messages
         messages = history + (Message(role="user", content=user_input),)
         registry = ToolRegistry(tools)
+        memory_context = self._build_memory_context(
+            memory_context_builder=memory_context_builder,
+            user_input=user_input,
+        )
+        if notification_callback is not None:
+            self._notify_memory_recall(
+                memory_context=memory_context,
+                notification_callback=notification_callback,
+            )
         if planner is None:
             return self._run_message_loop(
                 session_id=session_id,
@@ -75,6 +97,7 @@ class AgentRuntime:
                 max_steps=max_steps,
                 repository_context_builder=repository_context_builder,
                 enable_repository_context=enable_repository_context,
+                memory_context=memory_context,
                 context_manager=context_manager,
                 stream_callback=stream_callback,
                 notification_callback=notification_callback,
@@ -124,6 +147,7 @@ class AgentRuntime:
                 start_step=step,
                 repository_context_builder=repository_context_builder,
                 enable_repository_context=enable_repository_context,
+                memory_context=memory_context,
                 context_manager=context_manager,
                 stream_callback=stream_callback,
                 notification_callback=notification_callback,
@@ -179,11 +203,15 @@ class AgentRuntime:
             task_plan = planner.replan_after_failure(
                 user_input=user_input,
                 history=history,
-                task_plan=self._mark_task_status(task_plan, task.id, "blocked", last_error=error),
+                task_plan=self._mark_task_status(
+                    task_plan, task.id, "blocked", last_error=error
+                ),
                 failed_task_id=task.id,
                 error=error,
             )
-            final_message = Message(role="assistant", content=f"Task {task.id} blocked: {error}")
+            final_message = Message(
+                role="assistant", content=f"Task {task.id} blocked: {error}"
+            )
             messages = messages + (final_message,)
             trace = trace + (
                 AgentTraceStep(
@@ -198,7 +226,9 @@ class AgentRuntime:
             break
 
         if final_message is None:
-            final_message = Message(role="assistant", content="No executable tasks remain.")
+            final_message = Message(
+                role="assistant", content="No executable tasks remain."
+            )
             messages = messages + (final_message,)
 
         session_store.save(
@@ -210,7 +240,11 @@ class AgentRuntime:
             ),
         )
         return RunResult(
-            final_message=final_message, messages=messages, trace=trace, task_plan=task_plan
+            final_message=final_message,
+            messages=messages,
+            trace=trace,
+            task_plan=task_plan,
+            memory_context=memory_context,
         )
 
     def _select_task_plan(
@@ -241,6 +275,7 @@ class AgentRuntime:
         max_steps: int,
         repository_context_builder: RepositoryContextBuilderProtocol | None,
         enable_repository_context: bool,
+        memory_context: MemoryContext | None,
         context_manager: ContextManagerProtocol | None,
         stream_callback: Callable[[str], None] | None,
         notification_callback: NotificationCallback | None,
@@ -257,6 +292,7 @@ class AgentRuntime:
             workspace_root=workspace_root,
             repository_context_builder=repository_context_builder,
             enable_repository_context=enable_repository_context,
+            memory_context=memory_context,
             skill_registry=skill_registry,
             task_plan=None,
             existing_context_state=context_state,
@@ -267,7 +303,9 @@ class AgentRuntime:
 
         for step in range(1, max_steps + 1):
             response = model_client.complete(
-                messages=model_messages, tools=registry.tools, stream_callback=stream_callback
+                messages=model_messages,
+                tools=registry.tools,
+                stream_callback=stream_callback,
             )
             if isinstance(response, Message):
                 final_messages = messages + (response,)
@@ -282,7 +320,12 @@ class AgentRuntime:
                         summary=response.content,
                     ),
                 )
-                return RunResult(final_message=response, messages=final_messages, trace=trace)
+                return RunResult(
+                    final_message=response,
+                    messages=final_messages,
+                    trace=trace,
+                    memory_context=memory_context,
+                )
 
             if isinstance(response, SkillCall):
                 messages, model_messages, trace = self._apply_skill_call(
@@ -305,6 +348,7 @@ class AgentRuntime:
                     workspace_root=workspace_root,
                     repository_context_builder=repository_context_builder,
                     enable_repository_context=enable_repository_context,
+                    memory_context=memory_context,
                     skill_registry=skill_registry,
                     task_plan=None,
                     existing_context_state=context_state,
@@ -331,6 +375,7 @@ class AgentRuntime:
                 workspace_root=workspace_root,
                 repository_context_builder=repository_context_builder,
                 enable_repository_context=enable_repository_context,
+                memory_context=memory_context,
                 skill_registry=skill_registry,
                 task_plan=None,
                 existing_context_state=context_state,
@@ -345,19 +390,23 @@ class AgentRuntime:
                     is_error=tool_result.is_error,
                     permission_decision=(
                         str(tool_result.data.get("decision"))
-                        if tool_result.data is not None and "decision" in tool_result.data
+                        if tool_result.data is not None
+                        and "decision" in tool_result.data
                         else None
                     ),
                     reason_code=(
                         str(tool_result.data.get("reason_code"))
-                        if tool_result.data is not None and "reason_code" in tool_result.data
+                        if tool_result.data is not None
+                        and "reason_code" in tool_result.data
                         else None
                     ),
                 )
                 for tool_result in tool_results
             )
             if tool_results and tool_results[-1].is_error:
-                final_message = Message(role="assistant", content=tool_results[-1].content)
+                final_message = Message(
+                    role="assistant", content=tool_results[-1].content
+                )
                 final_messages = messages + (final_message,)
                 session_store.save(
                     session_id,
@@ -367,6 +416,7 @@ class AgentRuntime:
                     final_message=final_message,
                     messages=final_messages,
                     trace=trace,
+                    memory_context=memory_context,
                 )
 
         raise RuntimeLimitError(max_steps)
@@ -386,6 +436,7 @@ class AgentRuntime:
         start_step: int,
         repository_context_builder: RepositoryContextBuilderProtocol | None,
         enable_repository_context: bool,
+        memory_context: MemoryContext | None,
         context_manager: ContextManagerProtocol | None,
         stream_callback: Callable[[str], None] | None,
         notification_callback: NotificationCallback | None,
@@ -395,7 +446,9 @@ class AgentRuntime:
         approval_callback: ApprovalCallback | None,
         existing_context_state: ContextManagementState | None,
     ) -> _TaskRunResult:
-        task_context_message = self._task_context_message(task=task, task_plan=task_plan)
+        task_context_message = self._task_context_message(
+            task=task, task_plan=task_plan
+        )
         model_messages, context_state = self._build_model_messages(
             history=history,
             messages=messages,
@@ -403,6 +456,7 @@ class AgentRuntime:
             workspace_root=workspace_root,
             repository_context_builder=repository_context_builder,
             enable_repository_context=enable_repository_context,
+            memory_context=memory_context,
             skill_registry=skill_registry,
             task_plan=task_plan,
             existing_context_state=existing_context_state,
@@ -416,7 +470,9 @@ class AgentRuntime:
 
         while task_step < max_steps:
             response = model_client.complete(
-                messages=model_messages, tools=registry.tools, stream_callback=stream_callback
+                messages=model_messages,
+                tools=registry.tools,
+                stream_callback=stream_callback,
             )
             if isinstance(response, Message):
                 final_messages = messages + (response,)
@@ -459,11 +515,12 @@ class AgentRuntime:
                     workspace_root=workspace_root,
                     repository_context_builder=repository_context_builder,
                     enable_repository_context=enable_repository_context,
+                    memory_context=memory_context,
                     skill_registry=skill_registry,
                     task_plan=task_plan,
                     existing_context_state=context_state,
                     context_manager=context_manager,
-                    prefix_messages=(task_context_message,)
+                    prefix_messages=(task_context_message,),
                 )
                 step += 1
                 task_step += 1
@@ -488,11 +545,12 @@ class AgentRuntime:
                 workspace_root=workspace_root,
                 repository_context_builder=repository_context_builder,
                 enable_repository_context=enable_repository_context,
+                memory_context=memory_context,
                 skill_registry=skill_registry,
                 task_plan=task_plan,
                 existing_context_state=context_state,
                 context_manager=context_manager,
-                prefix_messages=(task_context_message,)
+                prefix_messages=(task_context_message,),
             )
             trace = trace + tuple(
                 AgentTraceStep(
@@ -504,12 +562,14 @@ class AgentRuntime:
                     task_id=task.id,
                     permission_decision=(
                         str(tool_result.data.get("decision"))
-                        if tool_result.data is not None and "decision" in tool_result.data
+                        if tool_result.data is not None
+                        and "decision" in tool_result.data
                         else None
                     ),
                     reason_code=(
                         str(tool_result.data.get("reason_code"))
-                        if tool_result.data is not None and "reason_code" in tool_result.data
+                        if tool_result.data is not None
+                        and "reason_code" in tool_result.data
                         else None
                     ),
                 )
@@ -529,6 +589,32 @@ class AgentRuntime:
 
         raise RuntimeLimitError(max_steps)
 
+    def _build_memory_context(
+        self,
+        *,
+        memory_context_builder: MemoryContextBuilderProtocol | None,
+        user_input: str,
+    ) -> MemoryContext | None:
+        if memory_context_builder is None:
+            return None
+        try:
+            return memory_context_builder.build(user_input=user_input)
+        except (AgentError, OSError, ValueError):
+            LOGGER.warning("memory context build failed", exc_info=True)
+            return None
+
+    def _notify_memory_recall(
+        self,
+        *,
+        memory_context: MemoryContext | None,
+        notification_callback: NotificationCallback,
+    ) -> None:
+        if memory_context is None or not memory_context.relevant_files:
+            return
+        notification_callback("Memory recall:")
+        for file in memory_context.relevant_files:
+            notification_callback(f"  - {file.relative_path}")
+
     def _build_model_messages(
         self,
         *,
@@ -538,13 +624,14 @@ class AgentRuntime:
         workspace_root: Path,
         repository_context_builder: RepositoryContextBuilderProtocol | None,
         enable_repository_context: bool,
+        memory_context: MemoryContext | None,
         skill_registry: SkillRegistry | None,
         task_plan: TaskPlan | None,
         existing_context_state: ContextManagementState | None,
         context_manager: ContextManagerProtocol | None,
         prefix_messages: tuple[Message, ...] = (),
     ) -> tuple[tuple[Message, ...], ContextManagementState | None]:
-        model_messages = messages
+        system_messages: tuple[Message, ...] = ()
         if enable_repository_context and repository_context_builder is not None:
             repository_context = repository_context_builder.build(
                 workspace_root=workspace_root,
@@ -552,12 +639,19 @@ class AgentRuntime:
                 history=history,
             )
             if repository_context.rendered:
-                model_messages = (Message(role="system", content=repository_context.rendered), *model_messages)
+                system_messages = (
+                    *system_messages,
+                    Message(role="system", content=repository_context.rendered),
+                )
+        if memory_context is not None and memory_context.prompt.strip():
+            system_messages = (
+                *system_messages,
+                Message(role="system", content=memory_context.prompt),
+            )
         skill_catalog_message = self._build_skill_catalog_message(skill_registry)
         if skill_catalog_message is not None:
-            model_messages = (skill_catalog_message, *model_messages)
-        if prefix_messages:
-            model_messages = (*prefix_messages, *model_messages)
+            system_messages = (*system_messages, skill_catalog_message)
+        model_messages = (*prefix_messages, *system_messages, *messages)
         if context_manager is None:
             return model_messages, existing_context_state
         return context_manager.prepare_messages(
@@ -566,7 +660,9 @@ class AgentRuntime:
             existing_state=existing_context_state,
         )
 
-    def _build_skill_catalog_message(self, skill_registry: SkillRegistry | None) -> Message | None:
+    def _build_skill_catalog_message(
+        self, skill_registry: SkillRegistry | None
+    ) -> Message | None:
         if skill_registry is None:
             return None
         entries = skill_registry.catalog_entries()
@@ -574,7 +670,8 @@ class AgentRuntime:
             return None
         lines = [
             "Available skills can be selected by returning JSON only in the form "
-            '{"skill":{"name":"skill-name","arguments":"optional args"}} when a skill clearly matches the request.',
+            '{"skill":{"name":"skill-name","arguments":"optional args"}} '
+            "when a skill clearly matches the request.",
             "Only choose a skill when its when_to_use guidance strongly applies.",
             "Do not choose more than one skill per turn.",
             "Available skills:",
@@ -582,7 +679,8 @@ class AgentRuntime:
         for entry in entries:
             when_to_use = entry.when_to_use or ""
             lines.append(
-                f"- {entry.name}: {entry.description}" + (f" | when_to_use: {when_to_use}" if when_to_use else "")
+                f"- {entry.name}: {entry.description}"
+                + (f" | when_to_use: {when_to_use}" if when_to_use else "")
             )
         return Message(role="system", content="\n".join(lines))
 
@@ -614,7 +712,9 @@ class AgentRuntime:
         if not skill.metadata.model_selectable:
             raise AgentError(f"model selected non-selectable skill: {response.name}")
         try:
-            invocation = build_skill_invocation(command_name=response.name, raw_args=response.raw_args)
+            invocation = build_skill_invocation(
+                command_name=response.name, raw_args=response.raw_args
+            )
             expanded = skill_preprocessor.expand_invocation_body(invocation)
         except SkillError as error:
             raise AgentError(str(error)) from error
@@ -712,7 +812,9 @@ class AgentRuntime:
                 )
             approved = approval_callback(f"{tool.name}: {outcome.reason}")
             if approved:
-                return registry.invoke(tool_call=tool_call, workspace_root=workspace_root)
+                return registry.invoke(
+                    tool_call=tool_call, workspace_root=workspace_root
+                )
 
         return ToolResult(
             name=tool.name,
@@ -741,9 +843,13 @@ class AgentRuntime:
             raise AgentError("model response tool call ids must be unique")
 
     def _task_context_message(self, *, task: Task, task_plan: TaskPlan) -> Message:
-        completed = ", ".join(item.title for item in task_plan.tasks if item.status == "completed")
+        completed = ", ".join(
+            item.title for item in task_plan.tasks if item.status == "completed"
+        )
         remaining = ", ".join(
-            item.title for item in task_plan.tasks if item.status in {"pending", "blocked"}
+            item.title
+            for item in task_plan.tasks
+            if item.status in {"pending", "blocked"}
         )
         return Message(
             role="system",
@@ -773,14 +879,24 @@ class AgentRuntime:
         )
         return TaskPlan(
             tasks=tuple(
-                replace(task, status="blocked")
-                if task.status == "pending"
-                and any(dependency not in completed_task_ids for dependency in task.dependencies)
-                else replace(task, status="pending")
-                if task.status == "blocked"
-                and task.last_error is None
-                and all(dependency in completed_task_ids for dependency in task.dependencies)
-                else task
+                (
+                    replace(task, status="blocked")
+                    if task.status == "pending"
+                    and any(
+                        dependency not in completed_task_ids
+                        for dependency in task.dependencies
+                    )
+                    else (
+                        replace(task, status="pending")
+                        if task.status == "blocked"
+                        and task.last_error is None
+                        and all(
+                            dependency in completed_task_ids
+                            for dependency in task.dependencies
+                        )
+                        else task
+                    )
+                )
                 for task in task_plan.tasks
             )
         )
@@ -796,14 +912,20 @@ class AgentRuntime:
     ) -> TaskPlan:
         return TaskPlan(
             tasks=tuple(
-                replace(
-                    task,
-                    status=status,  # type: ignore[arg-type]
-                    last_error=last_error if last_error is not None else task.last_error,
-                    attempts=task.attempts + 1 if attempts_increment else task.attempts,
+                (
+                    replace(
+                        task,
+                        status=status,  # type: ignore[arg-type]
+                        last_error=(
+                            last_error if last_error is not None else task.last_error
+                        ),
+                        attempts=(
+                            task.attempts + 1 if attempts_increment else task.attempts
+                        ),
+                    )
+                    if task.id == task_id
+                    else task
                 )
-                if task.id == task_id
-                else task
                 for task in task_plan.tasks
             )
         )

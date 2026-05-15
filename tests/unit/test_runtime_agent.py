@@ -7,6 +7,7 @@ import pytest
 
 from project_agent.core.types import (
     ContextManagementState,
+    MemoryContext,
     Message,
     RepositoryContext,
     SessionState,
@@ -19,11 +20,20 @@ from project_agent.core.types import (
 from project_agent.errors import AgentError
 from project_agent.runtime.agent import AgentRuntime
 from project_agent.runtime.model_clients import MockModelClient
-from project_agent.runtime.permissions import PermissionMode, PermissionPolicy, ToolPermissionCategory
+from project_agent.runtime.permissions import (
+    PermissionMode,
+    PermissionPolicy,
+    ToolPermissionCategory,
+)
 from project_agent.runtime.session_store import InMemorySessionStore
 from project_agent.runtime.tool_registry import ToolRegistry
 from project_agent.runtime.tools import EchoTool
-from project_agent.skills import SkillPromptPreprocessor, SkillRegistry, SkillRuntimeSettings, load_skills
+from project_agent.skills import (
+    SkillPromptPreprocessor,
+    SkillRegistry,
+    SkillRuntimeSettings,
+    load_skills,
+)
 
 
 class BoomTool:
@@ -89,8 +99,16 @@ class ToolCallCapturingModelClient:
         del tools, stream_callback
         self.calls = (*self.calls, tuple(messages))
         if len(self.calls) == 1:
-            return (ToolCall(name="echo", arguments={"content": "ping"}, call_id="call_123"),)
+            return (
+                ToolCall(
+                    name="echo", arguments={"content": "ping"}, call_id="call_123"
+                ),
+            )
         return Message(role="assistant", content="done")
+
+
+class PlannedToolCallCapturingModelClient(ToolCallCapturingModelClient):
+    name = "planned-tool-call-capturing-model"
 
 
 class MultiToolCallCapturingModelClient:
@@ -111,7 +129,9 @@ class MultiToolCallCapturingModelClient:
         if len(self.calls) == 1:
             return (
                 ToolCall(name="echo", arguments={"content": "first"}, call_id="call_1"),
-                ToolCall(name="echo", arguments={"content": "second"}, call_id="call_2"),
+                ToolCall(
+                    name="echo", arguments={"content": "second"}, call_id="call_2"
+                ),
             )
         return Message(role="assistant", content="done")
 
@@ -134,7 +154,11 @@ class MultiToolCallWithErrorModelClient:
         if len(self.calls) == 1:
             return (
                 ToolCall(name="missing", arguments={}, call_id="call_1"),
-                ToolCall(name="side_effect", arguments={"content": "mutate"}, call_id="call_2"),
+                ToolCall(
+                    name="side_effect",
+                    arguments={"content": "mutate"},
+                    call_id="call_2",
+                ),
             )
         return Message(role="assistant", content="done")
 
@@ -201,7 +225,6 @@ class NonSelectableSkillCallModelClient:
         return SkillCall(name="internal-review")
 
 
-
 class StaticRepositoryContextBuilder:
     def build(
         self,
@@ -211,7 +234,11 @@ class StaticRepositoryContextBuilder:
         history: Sequence[Message],
     ) -> RepositoryContext:
         return RepositoryContext(
-            rendered="repo context", workspace=None, git=None, rules=(), relevant_files=()
+            rendered="repo context",
+            workspace=None,
+            git=None,
+            rules=(),
+            relevant_files=(),
         )
 
 
@@ -223,7 +250,30 @@ class EmptyRepositoryContextBuilder:
         user_input: str,
         history: Sequence[Message],
     ) -> RepositoryContext:
-        return RepositoryContext(rendered="", workspace=None, git=None, rules=(), relevant_files=())
+        return RepositoryContext(
+            rendered="", workspace=None, git=None, rules=(), relevant_files=()
+        )
+
+
+class StaticMemoryContextBuilder:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def build(self, *, user_input: str) -> MemoryContext:
+        self.calls += 1
+        return MemoryContext(prompt=f"memory for {user_input}", relevant_files=())
+
+
+class FailingMemoryContextBuilder:
+    def build(self, *, user_input: str) -> MemoryContext:
+        del user_input
+        raise AgentError("memory recall failed")
+
+
+class OSErrorMemoryContextBuilder:
+    def build(self, *, user_input: str) -> MemoryContext:
+        del user_input
+        raise OSError("memory directory unavailable")
 
 
 class PassthroughContextManager:
@@ -235,7 +285,9 @@ class PassthroughContextManager:
         existing_state: ContextManagementState | None,
     ) -> tuple[tuple[Message, ...], ContextManagementState | None]:
         del task_plan
-        return tuple(messages), existing_state or ContextManagementState(profile="compact-default", version="v1")
+        return tuple(messages), existing_state or ContextManagementState(
+            profile="compact-default", version="v1"
+        )
 
 
 class RecordingContextManager:
@@ -337,7 +389,9 @@ def test_agent_runtime_preserves_tool_call_id_for_follow_up_request(
     assert second_call_messages[-2] == Message(
         role="assistant",
         content="",
-        tool_calls=(ToolCall(name="echo", arguments={"content": "ping"}, call_id="call_123"),),
+        tool_calls=(
+            ToolCall(name="echo", arguments={"content": "ping"}, call_id="call_123"),
+        ),
     )
     assert second_call_messages[-1] == Message(
         role="tool",
@@ -398,7 +452,8 @@ def test_agent_runtime_stops_multiple_tool_calls_after_first_error(
     result = runtime.run_turn(
         session_id="session-1",
         user_input="use multiple tools with error",
-        model_client=MultiToolCallWithErrorModelClient(),        tools=[EchoTool(), side_effect_tool],
+        model_client=MultiToolCallWithErrorModelClient(),
+        tools=[EchoTool(), side_effect_tool],
         session_store=store,
         workspace_root=tmp_path,
         max_steps=3,
@@ -493,6 +548,153 @@ def test_agent_runtime_injects_repository_context_before_history_and_user_messag
     assert store.load("session-1").messages[0].role == "user"
 
 
+def test_agent_runtime_injects_memory_context(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    model_client = CapturingModelClient()
+
+    result = runtime.run_turn(
+        session_id="session-1",
+        user_input="hello",
+        model_client=model_client,
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        memory_context_builder=StaticMemoryContextBuilder(),
+    )
+
+    assert result.memory_context is not None
+    assert result.memory_context.prompt == "memory for hello"
+    assert model_client.messages[0] == Message(
+        role="system", content="memory for hello"
+    )
+
+
+def test_agent_runtime_continues_when_memory_context_build_fails(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    result = runtime.run_turn(
+        session_id="session-1",
+        user_input="hello",
+        model_client=MockModelClient(),
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        memory_context_builder=FailingMemoryContextBuilder(),
+    )
+
+    assert result.final_message.content == "Mock response (turn 1): hello"
+    assert result.memory_context is None
+
+
+
+def test_agent_runtime_continues_when_memory_context_build_raises_os_error(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    result = runtime.run_turn(
+        session_id="session-1",
+        user_input="hello",
+        model_client=MockModelClient(),
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        memory_context_builder=OSErrorMemoryContextBuilder(),
+    )
+
+    assert result.final_message.content == "Mock response (turn 1): hello"
+    assert result.memory_context is None
+
+
+
+def test_agent_runtime_orders_repository_memory_and_skill_system_messages(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    skill_registry = SkillRegistry(())
+    model_client = CapturingModelClient()
+
+    runtime.run_turn(
+        session_id="session-1",
+        user_input="hello",
+        model_client=model_client,
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        repository_context_builder=StaticRepositoryContextBuilder(),
+        memory_context_builder=StaticMemoryContextBuilder(),
+        skill_registry=skill_registry,
+    )
+
+    assert [message.content for message in model_client.messages[:2]] == [
+        "repo context",
+        "memory for hello",
+    ]
+
+
+def test_agent_runtime_context_manager_receives_memory_messages(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    context_manager = RecordingContextManager()
+
+    runtime.run_turn(
+        session_id="session-1",
+        user_input="hello",
+        model_client=CapturingModelClient(),
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        memory_context_builder=StaticMemoryContextBuilder(),
+        context_manager=context_manager,
+    )
+
+    assert context_manager.received_messages[0][0] == Message(
+        role="system", content="memory for hello"
+    )
+
+
+def test_agent_runtime_reinjects_memory_after_tool_result(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    model_client = ToolCallCapturingModelClient()
+    context_manager = RecordingContextManager()
+    memory_builder = StaticMemoryContextBuilder()
+
+    runtime.run_turn(
+        session_id="session-1",
+        user_input="use tool ping",
+        model_client=model_client,
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        memory_context_builder=memory_builder,
+        context_manager=context_manager,
+    )
+
+    assert memory_builder.calls == 1
+    assert len(context_manager.received_messages) == 2
+    assert context_manager.received_messages[1][0] == Message(
+        role="system",
+        content="memory for use tool ping",
+    )
+
+
 def test_agent_runtime_skips_repository_context_when_disabled(
     runtime: AgentRuntime,
     store: InMemorySessionStore,
@@ -537,6 +739,39 @@ def test_agent_runtime_skips_empty_repository_context(
     assert [message.role for message in model_client.messages] == ["user"]
 
 
+def test_agent_runtime_reinjects_memory_after_tool_result_in_planned_task(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    planner = SequencePlanner(
+        TaskPlan(tasks=(Task(id="task_1", title="First", description="First"),))
+    )
+    model_client = PlannedToolCallCapturingModelClient()
+    context_manager = RecordingContextManager()
+    memory_builder = StaticMemoryContextBuilder()
+
+    runtime.run_turn(
+        session_id="session-1",
+        user_input="use tool ping",
+        model_client=model_client,
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=8,
+        planner=planner,
+        memory_context_builder=memory_builder,
+        context_manager=context_manager,
+    )
+
+    assert memory_builder.calls == 1
+    assert len(model_client.calls) == 2
+    assert context_manager.received_messages[1][1] == Message(
+        role="system",
+        content="memory for use tool ping",
+    )
+
+
 def test_agent_runtime_persists_context_state_from_context_manager(
     runtime: AgentRuntime,
     store: InMemorySessionStore,
@@ -567,7 +802,12 @@ def test_agent_runtime_propagates_context_state_across_planned_tasks(
         TaskPlan(
             tasks=(
                 Task(id="task_1", title="First", description="First"),
-                Task(id="task_2", title="Second", description="Second", dependencies=("task_1",)),
+                Task(
+                    id="task_2",
+                    title="Second",
+                    description="Second",
+                    dependencies=("task_1",),
+                ),
             )
         )
     )
@@ -582,6 +822,7 @@ def test_agent_runtime_propagates_context_state_across_planned_tasks(
         workspace_root=tmp_path,
         max_steps=8,
         planner=planner,
+        memory_context_builder=StaticMemoryContextBuilder(),
         context_manager=context_manager,
     )
 
@@ -589,8 +830,18 @@ def test_agent_runtime_propagates_context_state_across_planned_tasks(
     assert context_manager.received_states[0] is None
     assert context_manager.received_states[1] is not None
     assert context_manager.received_states[1].turn_count == 1
-    assert context_manager.received_messages[0][0].content.startswith("Execute the current task.")
-    assert context_manager.received_messages[1][0].content.startswith("Execute the current task.")
+    assert context_manager.received_messages[0][0].content.startswith(
+        "Execute the current task."
+    )
+    assert context_manager.received_messages[0][1] == Message(
+        role="system", content="memory for hello"
+    )
+    assert context_manager.received_messages[1][0].content.startswith(
+        "Execute the current task."
+    )
+    assert context_manager.received_messages[1][1] == Message(
+        role="system", content="memory for hello"
+    )
     context_state = store.load("session-1").context_state
     assert context_state is not None
     assert context_state.turn_count == 2
@@ -630,16 +881,20 @@ class SequencePlanner:
         self.replans = (*self.replans, (failed_task_id, error))
         return TaskPlan(
             tasks=tuple(
-                task
-                if task.status == "completed"
-                else Task(
-                    id=task.id,
-                    title=task.title,
-                    description=task.description,
-                    status="blocked",
-                    dependencies=task.dependencies,
-                    attempts=task.attempts,
-                    last_error=error if task.id == failed_task_id else task.last_error,
+                (
+                    task
+                    if task.status == "completed"
+                    else Task(
+                        id=task.id,
+                        title=task.title,
+                        description=task.description,
+                        status="blocked",
+                        dependencies=task.dependencies,
+                        attempts=task.attempts,
+                        last_error=(
+                            error if task.id == failed_task_id else task.last_error
+                        ),
+                    )
                 )
                 for task in task_plan.tasks
             )
@@ -665,7 +920,12 @@ def test_agent_runtime_executes_planned_tasks_and_persists_task_plan(
         TaskPlan(
             tasks=(
                 Task(id="task_1", title="First", description="First"),
-                Task(id="task_2", title="Second", description="Second", dependencies=("task_1",)),
+                Task(
+                    id="task_2",
+                    title="Second",
+                    description="Second",
+                    dependencies=("task_1",),
+                ),
             )
         )
     )
@@ -684,7 +944,10 @@ def test_agent_runtime_executes_planned_tasks_and_persists_task_plan(
 
     assert result.final_message.content == "ok"
     assert result.task_plan is not None
-    assert [task.status for task in result.task_plan.tasks] == ["completed", "completed"]
+    assert [task.status for task in result.task_plan.tasks] == [
+        "completed",
+        "completed",
+    ]
     assert result.messages == (
         Message(role="user", content="hello"),
         Message(role="assistant", content="ok"),
@@ -729,7 +992,11 @@ def test_agent_runtime_resumes_unfinished_session_task_plan(
     assert planner.create_calls == 0
     assert result.task_plan is not None
     assert [task.id for task in result.task_plan.tasks] == ["task_1", "task_2"]
-    assert [task.status for task in result.task_plan.tasks] == ["completed", "completed"]
+    assert [task.status for task in result.task_plan.tasks] == [
+        "completed",
+        "completed",
+    ]
+
 
 def test_agent_runtime_unblocks_dependency_blocked_task_when_dependencies_complete(
     runtime: AgentRuntime,
@@ -765,7 +1032,11 @@ def test_agent_runtime_unblocks_dependency_blocked_task_when_dependencies_comple
 
     assert result.final_message.content == "ok"
     assert result.task_plan is not None
-    assert [task.status for task in result.task_plan.tasks] == ["completed", "completed"]
+    assert [task.status for task in result.task_plan.tasks] == [
+        "completed",
+        "completed",
+    ]
+
 
 def test_agent_runtime_does_not_resume_failed_blocked_task(
     runtime: AgentRuntime,
@@ -808,7 +1079,6 @@ def test_agent_runtime_does_not_resume_failed_blocked_task(
     assert result.task_plan.tasks[0].last_error == "boom"
 
 
-
 def test_agent_runtime_applies_model_selected_skill_and_continues(
     runtime: AgentRuntime,
     store: InMemorySessionStore,
@@ -826,7 +1096,9 @@ def test_agent_runtime_applies_model_selected_skill_and_continues(
             "Review target {{args[0]}}"
         ),
     )
-    registry = SkillRegistry(load_skills(builtin_root=None, user_root=None, project_root=project_root))
+    registry = SkillRegistry(
+        load_skills(builtin_root=None, user_root=None, project_root=project_root)
+    )
     preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
     model_client = SkillCallCapturingModelClient()
     context_manager = RecordingContextManager()
@@ -846,7 +1118,10 @@ def test_agent_runtime_applies_model_selected_skill_and_continues(
 
     assert result.final_message.content == "done"
     assert [step.event for step in result.trace] == ["skill", "assistant"]
-    assert any(message.content.startswith("Activated skill: review-change") for message in result.messages)
+    assert any(
+        message.content.startswith("Activated skill: review-change")
+        for message in result.messages
+    )
     assert len(model_client.calls) == 2
     assert len(context_manager.received_messages) == 2
     assert any(
@@ -854,11 +1129,10 @@ def test_agent_runtime_applies_model_selected_skill_and_continues(
         for message in model_client.calls[1]
     )
     assert any(
-        message.role == "system" and message.content.startswith("Activated skill: review-change")
+        message.role == "system"
+        and message.content.startswith("Activated skill: review-change")
         for message in context_manager.received_messages[1]
     )
-
-
 
 
 def test_agent_runtime_emits_notification_for_model_selected_skill(
@@ -878,7 +1152,9 @@ def test_agent_runtime_emits_notification_for_model_selected_skill(
             "Review target {{args[0]}}"
         ),
     )
-    registry = SkillRegistry(load_skills(builtin_root=None, user_root=None, project_root=project_root))
+    registry = SkillRegistry(
+        load_skills(builtin_root=None, user_root=None, project_root=project_root)
+    )
     preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
     notifications: list[str] = []
 
@@ -939,7 +1215,9 @@ def test_agent_runtime_rejects_non_selectable_model_selected_skill(
             "Internal review"
         ),
     )
-    registry = SkillRegistry(load_skills(builtin_root=None, user_root=None, project_root=project_root))
+    registry = SkillRegistry(
+        load_skills(builtin_root=None, user_root=None, project_root=project_root)
+    )
     preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
 
     with pytest.raises(AgentError, match="non-selectable"):
@@ -964,9 +1242,15 @@ def test_agent_runtime_rejects_repeated_skill_selection_in_one_turn(
     project_root = tmp_path / ".project_agent" / "skills"
     _write_skill(
         project_root / "review-change" / "SKILL.md",
-        "---\nname: review-change\ndescription: review code changes\n---\nReview target {{args[0]}}",
+        (
+            "---\nname: review-change\n"
+            "description: review code changes\n---\n"
+            "Review target {{args[0]}}"
+        ),
     )
-    registry = SkillRegistry(load_skills(builtin_root=None, user_root=None, project_root=project_root))
+    registry = SkillRegistry(
+        load_skills(builtin_root=None, user_root=None, project_root=project_root)
+    )
     preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
 
     with pytest.raises(AgentError, match="too many skills"):
@@ -989,7 +1273,9 @@ def test_agent_runtime_denies_tool_call_when_permission_policy_blocks_it(
     tmp_path: Path,
 ) -> None:
     result = runtime._run_tool_call(
-        tool_call=ToolCall(name="side_effect", arguments={"content": "x"}, call_id="call_1"),
+        tool_call=ToolCall(
+            name="side_effect", arguments={"content": "x"}, call_id="call_1"
+        ),
         registry=cli_tool_registry([SideEffectTool()]),
         workspace_root=tmp_path,
         permission_policy=PermissionPolicy(mode=PermissionMode.DONT_ASK),
@@ -1008,7 +1294,9 @@ def test_agent_runtime_requires_approval_without_callback_for_write_tool(
     tmp_path: Path,
 ) -> None:
     result = runtime._run_tool_call(
-        tool_call=ToolCall(name="side_effect", arguments={"content": "x"}, call_id="call_1"),
+        tool_call=ToolCall(
+            name="side_effect", arguments={"content": "x"}, call_id="call_1"
+        ),
         registry=cli_tool_registry([SideEffectTool()]),
         workspace_root=tmp_path,
         permission_policy=PermissionPolicy(mode=PermissionMode.DEFAULT),
@@ -1023,6 +1311,7 @@ def test_agent_runtime_requires_approval_without_callback_for_write_tool(
 
 def cli_tool_registry(tools: Sequence[object]) -> ToolRegistry:
     return ToolRegistry(tools)  # type: ignore[arg-type]
+
 
 def _make_preprocessor(
     *,

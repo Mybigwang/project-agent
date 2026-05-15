@@ -8,6 +8,7 @@ from project_agent.core.types import (
     BudgetSnapshot,
     CompactionSummarySnapshot,
     ContextManagementState,
+    MemoryContext,
     Message,
     RepositoryContext,
     SessionState,
@@ -85,6 +86,10 @@ class RepositoryContextBuilderProtocol(Protocol):
         user_input: str,
         history: Sequence[Message],
     ) -> RepositoryContext: ...
+
+
+class MemoryContextBuilderProtocol(Protocol):
+    def build(self, *, user_input: str) -> MemoryContext: ...
 
 
 class ContextBudgetEstimatorProtocol(Protocol):

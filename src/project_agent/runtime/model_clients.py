@@ -3,11 +3,13 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import json
+import re
 import socket
 import ssl
 import urllib.parse
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from io import StringIO
 from typing import Any
 
 from project_agent.core.interfaces import StreamingModelClient, Tool
@@ -17,6 +19,7 @@ from project_agent.errors import AgentError
 MAX_MODEL_RESPONSE_BYTES = 16_000_000
 MAX_TOOL_CALLS_PER_RESPONSE = 20
 SKILL_CALL_KEY = "skill"
+_MEMORY_MANIFEST_PATTERN = re.compile(r"^- path: (?P<path>.+)$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -46,7 +49,9 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self._ssl_context = context
 
     def connect(self) -> None:
-        sock = socket.create_connection((self._connection_host, self.port), self.timeout)
+        sock = socket.create_connection(
+            (self._connection_host, self.port), self.timeout
+        )
         self.sock = self._ssl_context.wrap_socket(sock, server_hostname=self.host)
 
 
@@ -107,14 +112,18 @@ class OpenAICompatibleModelClient(StreamingModelClient):
                 connection.request("POST", path, body=body, headers=headers)
                 response = connection.getresponse()
                 if response.status >= 400:
-                    raise AgentError(f"model stream request failed with HTTP {response.status}")
+                    raise AgentError(
+                        f"model stream request failed with HTTP {response.status}"
+                    )
                 return _parse_accumulated_stream(response, stream_callback)
             finally:
                 connection.close()
         except AgentError:
             raise
         except OSError as error:
-            raise AgentError("model stream request failed due to a network error") from error
+            raise AgentError(
+                "model stream request failed due to a network error"
+            ) from error
 
     def stream_complete(
         self,
@@ -151,7 +160,9 @@ class OpenAICompatibleModelClient(StreamingModelClient):
                 connection.request("POST", path, body=body, headers=headers)
                 response = connection.getresponse()
                 if response.status >= 400:
-                    raise AgentError(f"model request failed with HTTP {response.status}")
+                    raise AgentError(
+                        f"model request failed with HTTP {response.status}"
+                    )
                 yield from _iter_stream_content(response)
             finally:
                 connection.close()
@@ -213,8 +224,17 @@ class MockModelClient(StreamingModelClient):
         tool_message = self._find_last_message(messages, role="tool")
         turn = self._turn_count(messages)
 
+        if not tools and "Memory manifest:" in user_message.content:
+            return Message(
+                role="assistant",
+                content=self._select_memory_files(user_message.content),
+            )
         if user_message.content == "loop forever":
-            return (ToolCall(name="echo", arguments={"content": "loop"}, call_id="call_loop"),)
+            return (
+                ToolCall(
+                    name="echo", arguments={"content": "loop"}, call_id="call_loop"
+                ),
+            )
         if user_message.content == "missing tool" and tool_message is None:
             return (ToolCall(name="missing", arguments={}, call_id="call_missing"),)
         if user_message.content == "boom tool" and tool_message is None:
@@ -223,7 +243,9 @@ class MockModelClient(StreamingModelClient):
             return (
                 ToolCall(
                     name="echo",
-                    arguments={"content": user_message.content.removeprefix("use tool ")},
+                    arguments={
+                        "content": user_message.content.removeprefix("use tool ")
+                    },
                     call_id="call_echo",
                 ),
             )
@@ -233,7 +255,7 @@ class MockModelClient(StreamingModelClient):
                 for word in content.split():
                     stream_callback(word + " ")
             return Message(role="assistant", content=content)
-        
+
         content = f"Mock response (turn {turn}): {user_message.content}"
         if stream_callback:
             for word in content.split():
@@ -251,7 +273,9 @@ class MockModelClient(StreamingModelClient):
             return ()
         return tuple(response.content.split())
 
-    def _find_last_message(self, messages: Sequence[Message], *, role: str) -> Message | None:
+    def _find_last_message(
+        self, messages: Sequence[Message], *, role: str
+    ) -> Message | None:
         for message in reversed(messages):
             if message.role == role:
                 return message
@@ -270,6 +294,14 @@ class MockModelClient(StreamingModelClient):
             raise ValueError("tool payload content must be a string")
         return content
 
+    def _select_memory_files(self, content: str) -> str:
+        manifest = content.split("Memory manifest:", maxsplit=1)[1]
+        paths = tuple(
+            match.group("path").strip()
+            for match in _MEMORY_MANIFEST_PATTERN.finditer(manifest)
+        )
+        return json.dumps({"files": paths[:1]}, ensure_ascii=False)
+
     def _turn_count(self, messages: Sequence[Message]) -> int:
         return sum(1 for message in messages if message.role == "user")
 
@@ -280,7 +312,9 @@ def _serialize_message(message: Message) -> dict[str, object]:
         serialized = {
             **serialized,
             "content": message.content or None,
-            "tool_calls": [_serialize_tool_call(tool_call) for tool_call in message.tool_calls],
+            "tool_calls": [
+                _serialize_tool_call(tool_call) for tool_call in message.tool_calls
+            ],
         }
     if message.tool_call_id is not None:
         serialized = {**serialized, "tool_call_id": message.tool_call_id}
@@ -330,7 +364,9 @@ def _validate_base_url(base_url: str) -> _ValidatedBaseUrl:
         raise AgentError("model_base_url port must be valid") from error
     connection_host = _resolve_public_host(parsed.hostname)
     path = parsed.path.rstrip("/") or ""
-    host_header = parsed.hostname if parsed.port is None else f"{parsed.hostname}:{port}"
+    host_header = (
+        parsed.hostname if parsed.port is None else f"{parsed.hostname}:{port}"
+    )
     return _ValidatedBaseUrl(
         host=parsed.hostname,
         host_header=host_header,
@@ -379,7 +415,9 @@ def _parse_accumulated_stream(
 ) -> Message | SkillCall | tuple[ToolCall, ...]:
     received_bytes = 0
     full_content = ""
-    # tool_calls_data format: { index: {"id": call_id, "name": name, "arguments": accumulated_args} }
+    pending_content = StringIO()
+    # tool_calls_data format:
+    # {index: {"id": call_id, "name": name, "arguments": accumulated_args}}
     tool_calls_data: dict[int, dict[str, str]] = {}
 
     while True:
@@ -419,6 +457,11 @@ def _parse_accumulated_stream(
         content_chunk = delta.get("content")
         if isinstance(content_chunk, str) and content_chunk:
             full_content += content_chunk
+            pending_content.write(content_chunk)
+            if _is_still_possible_skill_call(full_content):
+                continue
+            stream_callback(pending_content.getvalue())
+            pending_content = StringIO()
 
         tool_calls_chunk = delta.get("tool_calls")
         if isinstance(tool_calls_chunk, list):
@@ -453,7 +496,9 @@ def _parse_accumulated_stream(
             try:
                 args_obj = json.loads(tc_dict["arguments"] or "{}")
             except json.JSONDecodeError as error:
-                raise AgentError("model stream tool call arguments must be valid JSON") from error
+                raise AgentError(
+                    "model stream tool call arguments must be valid JSON"
+                ) from error
 
             tool_calls.append(
                 ToolCall(
@@ -468,9 +513,18 @@ def _parse_accumulated_stream(
     if skill_call is not None:
         return skill_call
 
-    if full_content:
-        stream_callback(full_content)
+    pending = pending_content.getvalue()
+    if pending:
+        stream_callback(pending)
     return Message(role="assistant", content=full_content)
+
+
+def _is_still_possible_skill_call(content: str) -> bool:
+    stripped = content.lstrip()
+    if not stripped:
+        return True
+    skill_prefix = '{"skill"'
+    return skill_prefix.startswith(stripped[: len(skill_prefix)])
 
 
 def _parse_stream_chunk(data: str) -> str:
@@ -522,7 +576,9 @@ def _parse_skill_call_content(content: str) -> SkillCall | None:
     return SkillCall(name=name.strip(), raw_args=raw_args.strip(), call_id=call_id)
 
 
-def _parse_chat_response(response: dict[str, object]) -> Message | SkillCall | tuple[ToolCall, ...]:
+def _parse_chat_response(
+    response: dict[str, object]
+) -> Message | SkillCall | tuple[ToolCall, ...]:
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
         raise AgentError("model response missing choices")
@@ -566,7 +622,6 @@ def _parse_tool_calls(message: dict[object, object]) -> tuple[ToolCall, ...] | N
     return parsed_tool_calls
 
 
-
 def _parse_tool_call(tool_call: object) -> ToolCall:
     if not isinstance(tool_call, dict):
         raise AgentError("model response tool call must be an object")
@@ -588,7 +643,9 @@ def _parse_tool_call(tool_call: object) -> ToolCall:
     try:
         arguments = json.loads(raw_arguments or "{}")
     except json.JSONDecodeError as error:
-        raise AgentError("model response tool call arguments must be valid JSON") from error
+        raise AgentError(
+            "model response tool call arguments must be valid JSON"
+        ) from error
     if not isinstance(arguments, dict):
         raise AgentError("model response tool call arguments must be a JSON object")
     return ToolCall(name=name, arguments=arguments, call_id=call_id)

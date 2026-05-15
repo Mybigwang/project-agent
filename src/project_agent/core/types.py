@@ -161,6 +161,21 @@ class RepositoryContext:
 
 
 @dataclass(frozen=True)
+class MemoryFile:
+    path: Path
+    relative_path: str
+    title: str
+    description: str
+    mtime: float
+
+
+@dataclass(frozen=True)
+class MemoryContext:
+    prompt: str
+    relevant_files: tuple[MemoryFile, ...]
+
+
+@dataclass(frozen=True)
 class AgentTraceStep:
     step: int
     event: str
@@ -179,3 +194,4 @@ class RunResult:
     messages: tuple[Message, ...]
     trace: tuple[AgentTraceStep, ...]
     task_plan: TaskPlan | None = None
+    memory_context: MemoryContext | None = None
