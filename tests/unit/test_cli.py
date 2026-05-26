@@ -70,6 +70,12 @@ def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "memory_max_relevant_files": 3,
         "memory_max_relevant_file_chars": 3000,
         "memory_max_manifest_files": 50,
+        "multi_agent_enabled": True,
+        "coordinator_enabled": False,
+        "max_subagents_per_turn": 4,
+        "max_subagent_steps": 12,
+        "max_worker_result_chars": 8000,
+        "allow_recursive_subagents": False,
         **overrides,
     }
     return Settings(**values)
@@ -103,6 +109,9 @@ def test_doctor_command_uses_cli_overrides(tmp_path: Path) -> None:
         f"memory_dir={(tmp_path / '.project_agent' / 'memory').resolve()}"
         in result.stdout
     )
+    assert "multi_agent_enabled=True" in result.stdout
+    assert "coordinator_enabled=False" in result.stdout
+    assert "max_subagents_per_turn=4" in result.stdout
 
 
 def test_run_command_executes_runtime(tmp_path: Path) -> None:
@@ -239,6 +248,132 @@ def test_run_command_streams_saved_response_without_second_model_call(
     assert result.exit_code == 0
     assert result.stdout == "response 1\n"
     assert model_client.complete_calls == 1
+
+
+def test_run_command_passes_multi_agent_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli_module, "load_settings", lambda **_: _make_settings(tmp_path))
+
+    def fake_run_once(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "_run_once", fake_run_once)
+
+    result = runner.invoke(
+        app,
+        [
+            "--workspace-root",
+            str(tmp_path),
+            "run",
+            "--prompt",
+            "hello",
+            "--coordinator",
+            "--max-subagents",
+            "2",
+            "--max-subagent-steps",
+            "5",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["coordinator_enabled"] is True
+    assert captured["max_subagents"] == 2
+    assert captured["max_subagent_steps"] == 5
+    assert isinstance(captured["orchestrator"], cli_module.MultiAgentOrchestrator)
+
+
+def test_coordinator_uses_agent_tool_when_multi_agent_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli_module, "load_settings", lambda **_: _make_settings(tmp_path))
+
+    def fake_run_coordinator_turn(self: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return cli_module.MultiAgentRunResult(
+            final_message=Message(role="assistant", content="ok"),
+            messages=(),
+            trace=(),
+        )
+
+    monkeypatch.setattr(
+        cli_module.MultiAgentOrchestrator,
+        "run_coordinator_turn",
+        fake_run_coordinator_turn,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "--workspace-root",
+            str(tmp_path),
+            "run",
+            "--prompt",
+            "coordinate",
+            "--coordinator",
+            "--no-multi-agent",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert any(tool.name == "agent" for tool in captured["tools"])
+
+
+def test_coordinator_command_routes_without_skill_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli_module, "load_settings", lambda **_: _make_settings(tmp_path))
+
+    def fake_run_coordinator_turn(self: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return cli_module.MultiAgentRunResult(
+            final_message=Message(role="assistant", content="ok"),
+            messages=(),
+            trace=(),
+        )
+
+    monkeypatch.setattr(
+        cli_module.MultiAgentOrchestrator,
+        "run_coordinator_turn",
+        fake_run_coordinator_turn,
+    )
+
+    result = runner.invoke(
+        app,
+        ["--workspace-root", str(tmp_path), "run", "--prompt", "/coordinator do it"],
+    )
+
+    assert result.exit_code == 0
+    assert "Unknown command" not in result.stdout
+    assert captured["user_input"] == "do it"
+
+
+def test_run_command_coordinator_and_plan_execute_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(cli_module, "load_settings", lambda **_: _make_settings(tmp_path))
+
+    result = runner.invoke(
+        app,
+        [
+            "--workspace-root",
+            str(tmp_path),
+            "run",
+            "--prompt",
+            "/plan-execute hello",
+            "--coordinator",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "coordinator mode cannot be combined with /plan-execute yet" in result.stdout
 
 
 def test_run_command_uses_settings_stream_output_when_stream_flag_absent(

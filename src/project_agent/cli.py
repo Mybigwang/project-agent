@@ -14,7 +14,15 @@ from project_agent.core.interfaces import (
     RepositoryContextBuilderProtocol,
     Tool,
 )
-from project_agent.core.types import AgentTraceStep, MemoryContext, Message, TaskPlan
+from project_agent.core.types import (
+    AgentTraceStep,
+    MemoryContext,
+    Message,
+    MultiAgentRunResult,
+    MultiAgentTraceStep,
+    RunResult,
+    TaskPlan,
+)
 from project_agent.errors import AgentError, map_exception_to_exit_code
 from project_agent.logging import configure_logging
 from project_agent.runtime.agent import AgentRuntime
@@ -35,6 +43,8 @@ from project_agent.runtime.model_clients import (
     MockModelClient,
     OpenAICompatibleModelClient,
 )
+from project_agent.runtime.multi_agent import MultiAgentOrchestrator
+from project_agent.runtime.multi_agent_tools import SubagentTool
 from project_agent.runtime.permissions import PermissionPolicy
 from project_agent.runtime.permissions.policy import load_permission_rules
 from project_agent.runtime.permissions.types import PermissionRule
@@ -100,6 +110,12 @@ def doctor(ctx: typer.Context) -> None:
     typer.echo(f"environment={settings.environment}")
     typer.echo(f"memory_enabled={settings.memory_enabled}")
     typer.echo(f"memory_dir={settings.memory_dir}")
+    typer.echo(f"multi_agent_enabled={settings.multi_agent_enabled}")
+    typer.echo(f"coordinator_enabled={settings.coordinator_enabled}")
+    typer.echo(f"max_subagents_per_turn={settings.max_subagents_per_turn}")
+    typer.echo(f"max_subagent_steps={settings.max_subagent_steps}")
+    typer.echo(f"max_worker_result_chars={settings.max_worker_result_chars}")
+    typer.echo(f"allow_recursive_subagents={settings.allow_recursive_subagents}")
 
 
 @app.command()
@@ -115,6 +131,10 @@ def run(
     trace: bool = typer.Option(False, "--trace/--no-trace"),
     stream: bool | None = typer.Option(None, "--stream/--no-stream"),
     max_steps: int | None = typer.Option(None, "--max-steps"),
+    multi_agent: bool | None = typer.Option(None, "--multi-agent/--no-multi-agent"),
+    coordinator: bool | None = typer.Option(None, "--coordinator/--no-coordinator"),
+    max_subagents: int | None = typer.Option(None, "--max-subagents"),
+    max_subagent_steps: int | None = typer.Option(None, "--max-subagent-steps"),
 ) -> None:
     settings = _require_settings(ctx.obj)
     runtime = AgentRuntime()
@@ -174,6 +194,11 @@ def run(
     active_session_id = session_id or uuid4().hex
     active_max_steps = max_steps or settings.max_steps
     should_stream = settings.stream_output if stream is None else stream
+    active_multi_agent = settings.multi_agent_enabled if multi_agent is None else multi_agent
+    active_coordinator = settings.coordinator_enabled if coordinator is None else coordinator
+    active_max_subagents = max_subagents or settings.max_subagents_per_turn
+    active_max_subagent_steps = max_subagent_steps or settings.max_subagent_steps
+    orchestrator = MultiAgentOrchestrator(runtime=runtime)
 
     if prompt is not None:
         _run_once(
@@ -195,6 +220,11 @@ def run(
             permission_policy=permission_policy,
             context_manager=context_manager,
             interactive_approval=False,
+            multi_agent_enabled=active_multi_agent,
+            coordinator_enabled=active_coordinator,
+            max_subagents=active_max_subagents,
+            max_subagent_steps=active_max_subagent_steps,
+            orchestrator=orchestrator,
         )
         return
 
@@ -222,6 +252,11 @@ def run(
             permission_policy=permission_policy,
             context_manager=context_manager,
             interactive_approval=True,
+            multi_agent_enabled=active_multi_agent,
+            coordinator_enabled=active_coordinator,
+            max_subagents=active_max_subagents,
+            max_subagent_steps=active_max_subagent_steps,
+            orchestrator=orchestrator,
         )
 
 
@@ -264,6 +299,11 @@ def _run_once(
     permission_policy: PermissionPolicy,
     context_manager: ContextManager,
     interactive_approval: bool,
+    multi_agent_enabled: bool,
+    coordinator_enabled: bool,
+    max_subagents: int,
+    max_subagent_steps: int,
+    orchestrator: MultiAgentOrchestrator,
 ) -> None:
     import sys
 
@@ -286,11 +326,19 @@ def _run_once(
     cmd, actual_input = _parse_command(user_input)
 
     planner = None
+    use_coordinator = coordinator_enabled
+    if cmd == "/coordinator":
+        use_coordinator = True
+    elif cmd == "/plan-execute" and use_coordinator:
+        typer.echo("coordinator mode cannot be combined with /plan-execute yet")
+        return
     if cmd == "/plan-execute":
         planner = LLMPlanner(
             model_client=model_client,
             skill_catalog=_format_skill_catalog_for_planner(skill_registry),
         )
+    elif cmd == "/coordinator":
+        pass
     elif cmd is not None:
         skill = skill_registry.get(cmd.removeprefix("/"))
         if skill is None or not skill.metadata.user_invocable:
@@ -300,26 +348,74 @@ def _run_once(
             build_skill_invocation(command_name=cmd, raw_args=actual_input)
         )
 
-    result = runtime.run_turn(
-        session_id=session_id,
-        user_input=actual_input,
-        model_client=model_client,
-        tools=tools,
-        session_store=session_store,
-        workspace_root=settings.workspace_root,
-        max_steps=max_steps,
-        repository_context_builder=repository_context_builder,
-        enable_repository_context=enable_repository_context,
-        memory_context_builder=memory_context_builder,
-        planner=planner,
-        stream_callback=stream_callback if stream_output else None,
-        notification_callback=notification_callback,
-        skill_registry=skill_registry,
-        skill_preprocessor=skill_preprocessor,
-        permission_policy=permission_policy,
-        approval_callback=approval_callback if interactive_approval else None,
-        context_manager=context_manager,
-    )
+    active_tools = tools
+    if multi_agent_enabled or use_coordinator:
+        active_tools = [
+            *tools,
+            SubagentTool(
+                orchestrator=orchestrator,
+                parent_session_id=session_id,
+                model_client=model_client,
+                tools=tools,
+                session_store=session_store,
+                workspace_root=settings.workspace_root,
+                max_steps=max_subagent_steps,
+                max_subagents=max_subagents,
+                max_worker_result_chars=settings.max_worker_result_chars,
+                repository_context_builder=repository_context_builder,
+                enable_repository_context=enable_repository_context,
+                memory_context_builder=memory_context_builder,
+                context_manager=context_manager,
+                notification_callback=notification_callback,
+                skill_registry=skill_registry,
+                skill_preprocessor=skill_preprocessor,
+                permission_policy=permission_policy,
+                approval_callback=approval_callback if interactive_approval else None,
+                parent_user_input=actual_input,
+            ),
+        ]
+    result: RunResult | MultiAgentRunResult
+    if use_coordinator:
+        result = orchestrator.run_coordinator_turn(
+            session_id=session_id,
+            user_input=actual_input,
+            model_client=model_client,
+            tools=active_tools,
+            session_store=session_store,
+            workspace_root=settings.workspace_root,
+            max_steps=max_steps,
+            repository_context_builder=repository_context_builder,
+            enable_repository_context=enable_repository_context,
+            memory_context_builder=memory_context_builder,
+            stream_callback=stream_callback if stream_output else None,
+            notification_callback=notification_callback,
+            skill_registry=skill_registry,
+            skill_preprocessor=skill_preprocessor,
+            permission_policy=permission_policy,
+            approval_callback=approval_callback if interactive_approval else None,
+            context_manager=context_manager,
+        )
+    else:
+        result = runtime.run_turn(
+            session_id=session_id,
+            user_input=actual_input,
+            model_client=model_client,
+            tools=active_tools,
+            session_store=session_store,
+            workspace_root=settings.workspace_root,
+            max_steps=max_steps,
+            repository_context_builder=repository_context_builder,
+            enable_repository_context=enable_repository_context,
+            memory_context_builder=memory_context_builder,
+            planner=planner,
+            stream_callback=stream_callback if stream_output else None,
+            notification_callback=notification_callback,
+            skill_registry=skill_registry,
+            skill_preprocessor=skill_preprocessor,
+            permission_policy=permission_policy,
+            approval_callback=approval_callback if interactive_approval else None,
+            context_manager=context_manager,
+        )
     if stream_output:
         if not streamed_output and result.final_message.content:
             sys.stdout.write(_sanitize_final_output(result.final_message.content))
@@ -352,10 +448,11 @@ def _echo_task_progress(task_plan: TaskPlan | None) -> None:
         typer.echo(f"  - {task.status} {task.id}: {_sanitize_cli_text(task.title)}")
 
 
-def _echo_trace(trace: tuple[AgentTraceStep, ...]) -> None:
+def _echo_trace(trace: tuple[AgentTraceStep | MultiAgentTraceStep, ...]) -> None:
     for step in trace:
         if (
-            step.event == "task"
+            isinstance(step, AgentTraceStep)
+            and step.event == "task"
             and step.task_id is not None
             and step.task_status is not None
         ):
@@ -364,11 +461,17 @@ def _echo_trace(trace: tuple[AgentTraceStep, ...]) -> None:
                 f"[step {step.step}] task {step.task_id} "
                 f"{step.task_status} {status}: {_sanitize_cli_text(step.summary)}"
             )
-        if step.event == "tool" and step.tool_name is not None:
+        if step.event == "tool" and isinstance(step, AgentTraceStep) and step.tool_name is not None:
             status = "error" if step.is_error else "ok"
             typer.echo(
                 f"[step {step.step}] tool {step.tool_name} {status}: "
                 f"{_sanitize_cli_text(step.summary)}"
+            )
+        if step.event == "agent" and isinstance(step, MultiAgentTraceStep):
+            status = "error" if step.is_error else "ok"
+            typer.echo(
+                f"[step {step.step}] agent {step.agent_id or ''} "
+                f"{step.status or ''} {status}: {_sanitize_cli_text(step.summary)}"
             )
 
 

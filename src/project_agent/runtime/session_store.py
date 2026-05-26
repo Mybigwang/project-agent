@@ -6,6 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from project_agent.core.types import (
+    AgentRunRecord,
     AutoCompactionState,
     BudgetSnapshot,
     CompactionSummarySnapshot,
@@ -21,9 +22,13 @@ from project_agent.errors import SessionError
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 MESSAGE_ROLES = frozenset({"system", "user", "assistant", "tool"})
 TASK_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked"})
+AGENT_KINDS = frozenset({"subagent", "worker", "coordinator"})
+AGENT_RUN_STATUSES = frozenset({"created", "running", "completed", "failed", "cancelled"})
 MAX_TASKS_PER_PLAN = 50
 MAX_TASK_FIELD_CHARS = 2000
 MAX_TASK_DEPENDENCIES = 20
+MAX_AGENT_RUNS_PER_SESSION = 100
+MAX_AGENT_FIELD_CHARS = 2000
 
 
 class InMemorySessionStore:
@@ -79,6 +84,7 @@ def _serialize_session_state(state: SessionState) -> dict[str, object]:
         "messages": [asdict(message) for message in state.messages],
         "task_plan": _serialize_task_plan(state.task_plan),
         "context_state": _serialize_context_state(state.context_state),
+        "agent_runs": [_serialize_agent_run_record(agent_run) for agent_run in state.agent_runs],
     }
 
 
@@ -88,12 +94,18 @@ def _deserialize_session_state(payload: object) -> SessionState:
     messages = payload["messages"]
     task_plan = payload.get("task_plan")
     context_state = payload.get("context_state")
+    agent_runs = payload.get("agent_runs", [])
     if not isinstance(messages, list):
         raise ValueError("session messages must be a list")
+    if not isinstance(agent_runs, list):
+        raise ValueError("session agent_runs must be a list")
+    if len(agent_runs) > MAX_AGENT_RUNS_PER_SESSION:
+        raise ValueError("session has too many agent runs")
     return SessionState(
         messages=tuple(_deserialize_message(item) for item in messages),
         task_plan=_deserialize_task_plan(task_plan),
         context_state=_deserialize_context_state(context_state),
+        agent_runs=tuple(_deserialize_agent_run_record(item) for item in agent_runs),
     )
 
 
@@ -126,6 +138,64 @@ def _serialize_task(task: Task) -> dict[str, object]:
         "attempts": task.attempts,
         "last_error": task.last_error,
     }
+
+
+def _serialize_agent_run_record(record: AgentRunRecord) -> dict[str, object]:
+    return {
+        "agent_id": record.agent_id,
+        "session_id": record.session_id,
+        "name": record.name,
+        "description": record.description,
+        "kind": record.kind,
+        "status": record.status,
+        "result_summary": record.result_summary,
+        "error": record.error,
+    }
+
+
+def _deserialize_agent_run_record(payload: object) -> AgentRunRecord:
+    if not isinstance(payload, dict):
+        raise ValueError("agent run must be an object")
+    agent_id = payload["agent_id"]
+    session_id = payload["session_id"]
+    name = payload["name"]
+    description = payload["description"]
+    kind = payload["kind"]
+    status = payload["status"]
+    result_summary = payload.get("result_summary")
+    error = payload.get("error")
+    for field_name, value in {
+        "agent_id": agent_id,
+        "session_id": session_id,
+        "name": name,
+        "description": description,
+    }.items():
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"agent run {field_name} must be a non-empty string")
+        if len(value) > MAX_AGENT_FIELD_CHARS:
+            raise ValueError(f"agent run {field_name} is too long")
+    if kind not in AGENT_KINDS:
+        raise ValueError("agent run kind is invalid")
+    if status not in AGENT_RUN_STATUSES:
+        raise ValueError("agent run status is invalid")
+    if result_summary is not None and not isinstance(result_summary, str):
+        raise ValueError("agent run result_summary must be a string")
+    if error is not None and not isinstance(error, str):
+        raise ValueError("agent run error must be a string")
+    if result_summary is not None and len(result_summary) > MAX_AGENT_FIELD_CHARS:
+        raise ValueError("agent run result_summary is too long")
+    if error is not None and len(error) > MAX_AGENT_FIELD_CHARS:
+        raise ValueError("agent run error is too long")
+    return AgentRunRecord(
+        agent_id=agent_id,
+        session_id=session_id,
+        name=name,
+        description=description,
+        kind=kind,
+        status=status,
+        result_summary=result_summary,
+        error=error,
+    )
 
 
 def _deserialize_task(payload: object) -> Task:

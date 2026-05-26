@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 TaskStatus = Literal["pending", "in_progress", "completed", "blocked"]
+AgentKind = Literal["subagent", "worker", "coordinator"]
+AgentRunStatus = Literal["created", "running", "completed", "failed", "cancelled"]
 
 
 @dataclass(frozen=True)
@@ -113,10 +115,55 @@ class ContextManagementState:
 
 
 @dataclass(frozen=True)
+class AgentSpec:
+    name: str | None
+    description: str
+    prompt: str
+    kind: AgentKind = "subagent"
+    subagent_type: str | None = None
+    model: str | None = None
+    run_in_background: bool = False
+    parent_session_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentRunRecord:
+    agent_id: str
+    session_id: str
+    name: str
+    description: str
+    kind: AgentKind
+    status: AgentRunStatus
+    result_summary: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentNotification:
+    agent_id: str
+    status: AgentRunStatus
+    summary: str
+    result: str
+    usage: str | None = None
+
+
+@dataclass(frozen=True)
+class MultiAgentTraceStep:
+    step: int
+    event: str
+    summary: str = ""
+    agent_id: str | None = None
+    agent_name: str | None = None
+    status: AgentRunStatus | None = None
+    is_error: bool = False
+
+
+@dataclass(frozen=True)
 class SessionState:
     messages: tuple[Message, ...] = ()
     task_plan: TaskPlan | None = None
     context_state: ContextManagementState | None = None
+    agent_runs: tuple[AgentRunRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -195,3 +242,12 @@ class RunResult:
     trace: tuple[AgentTraceStep, ...]
     task_plan: TaskPlan | None = None
     memory_context: MemoryContext | None = None
+
+
+@dataclass(frozen=True)
+class MultiAgentRunResult:
+    final_message: Message
+    messages: tuple[Message, ...]
+    trace: tuple[AgentTraceStep | MultiAgentTraceStep, ...]
+    task_plan: TaskPlan | None = None
+    agents: tuple[AgentRunRecord, ...] = ()

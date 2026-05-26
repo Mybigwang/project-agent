@@ -504,6 +504,31 @@ def test_agent_runtime_wraps_tool_exception(
     assert result.trace[0].is_error is True
 
 
+def test_agent_runtime_injects_system_prefix_without_persisting_it(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    model_client = CapturingModelClient()
+
+    result = runtime.run_turn(
+        session_id="session-1",
+        user_input="hello",
+        model_client=model_client,
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        system_prefix_messages=(Message(role="system", content="coordinator mode"),),
+    )
+
+    assert model_client.messages[0] == Message(role="system", content="coordinator mode")
+    assert store.load("session-1").messages == (
+        Message(role="user", content="hello"),
+        result.final_message,
+    )
+
+
 def test_agent_runtime_injects_repository_context_before_history_and_user_message(
     runtime: AgentRuntime,
     store: InMemorySessionStore,

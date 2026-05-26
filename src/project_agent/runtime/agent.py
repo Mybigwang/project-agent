@@ -70,6 +70,7 @@ class AgentRuntime:
         skill_preprocessor: SkillPromptPreprocessor | None = None,
         permission_policy: PermissionPolicy | None = None,
         approval_callback: ApprovalCallback | None = None,
+        system_prefix_messages: Sequence[Message] = (),
     ) -> RunResult:
         state = session_store.load(session_id)
         history = state.messages
@@ -105,6 +106,7 @@ class AgentRuntime:
                 skill_preprocessor=skill_preprocessor,
                 permission_policy=permission_policy,
                 approval_callback=approval_callback,
+                system_prefix_messages=tuple(system_prefix_messages),
             )
 
         task_plan = self._select_task_plan(
@@ -156,6 +158,7 @@ class AgentRuntime:
                 permission_policy=permission_policy,
                 approval_callback=approval_callback,
                 existing_context_state=context_state,
+                system_prefix_messages=tuple(system_prefix_messages),
             )
             messages = task_result.messages
             trace = trace + task_result.trace
@@ -233,7 +236,8 @@ class AgentRuntime:
 
         session_store.save(
             session_id,
-            SessionState(
+            replace(
+                session_store.load(session_id),
                 messages=messages,
                 task_plan=task_plan,
                 context_state=context_state,
@@ -283,6 +287,7 @@ class AgentRuntime:
         skill_preprocessor: SkillPromptPreprocessor | None,
         permission_policy: PermissionPolicy | None,
         approval_callback: ApprovalCallback | None,
+        system_prefix_messages: tuple[Message, ...],
     ) -> RunResult:
         context_state = session_store.load(session_id).context_state
         model_messages, context_state = self._build_model_messages(
@@ -297,6 +302,7 @@ class AgentRuntime:
             task_plan=None,
             existing_context_state=context_state,
             context_manager=context_manager,
+            system_prefix_messages=system_prefix_messages,
         )
         trace: tuple[AgentTraceStep, ...] = ()
         skill_calls_used = 0
@@ -311,7 +317,11 @@ class AgentRuntime:
                 final_messages = messages + (response,)
                 session_store.save(
                     session_id,
-                    SessionState(messages=final_messages, context_state=context_state),
+                    replace(
+                        session_store.load(session_id),
+                        messages=final_messages,
+                        context_state=context_state,
+                    ),
                 )
                 trace = trace + (
                     AgentTraceStep(
@@ -353,6 +363,7 @@ class AgentRuntime:
                     task_plan=None,
                     existing_context_state=context_state,
                     context_manager=context_manager,
+                    system_prefix_messages=system_prefix_messages,
                 )
                 skill_calls_used += 1
                 continue
@@ -380,6 +391,7 @@ class AgentRuntime:
                 task_plan=None,
                 existing_context_state=context_state,
                 context_manager=context_manager,
+                system_prefix_messages=system_prefix_messages,
             )
             trace = trace + tuple(
                 AgentTraceStep(
@@ -410,7 +422,11 @@ class AgentRuntime:
                 final_messages = messages + (final_message,)
                 session_store.save(
                     session_id,
-                    SessionState(messages=final_messages, context_state=context_state),
+                    replace(
+                        session_store.load(session_id),
+                        messages=final_messages,
+                        context_state=context_state,
+                    ),
                 )
                 return RunResult(
                     final_message=final_message,
@@ -445,6 +461,7 @@ class AgentRuntime:
         permission_policy: PermissionPolicy | None,
         approval_callback: ApprovalCallback | None,
         existing_context_state: ContextManagementState | None,
+        system_prefix_messages: tuple[Message, ...],
     ) -> _TaskRunResult:
         task_context_message = self._task_context_message(
             task=task, task_plan=task_plan
@@ -462,6 +479,7 @@ class AgentRuntime:
             existing_context_state=existing_context_state,
             context_manager=context_manager,
             prefix_messages=(task_context_message,),
+            system_prefix_messages=system_prefix_messages,
         )
         trace: tuple[AgentTraceStep, ...] = ()
         step = start_step
@@ -521,6 +539,7 @@ class AgentRuntime:
                     existing_context_state=context_state,
                     context_manager=context_manager,
                     prefix_messages=(task_context_message,),
+                    system_prefix_messages=system_prefix_messages,
                 )
                 step += 1
                 task_step += 1
@@ -551,6 +570,7 @@ class AgentRuntime:
                 existing_context_state=context_state,
                 context_manager=context_manager,
                 prefix_messages=(task_context_message,),
+                system_prefix_messages=system_prefix_messages,
             )
             trace = trace + tuple(
                 AgentTraceStep(
@@ -630,8 +650,9 @@ class AgentRuntime:
         existing_context_state: ContextManagementState | None,
         context_manager: ContextManagerProtocol | None,
         prefix_messages: tuple[Message, ...] = (),
+        system_prefix_messages: tuple[Message, ...] = (),
     ) -> tuple[tuple[Message, ...], ContextManagementState | None]:
-        system_messages: tuple[Message, ...] = ()
+        system_messages: tuple[Message, ...] = tuple(system_prefix_messages)
         if enable_repository_context and repository_context_builder is not None:
             repository_context = repository_context_builder.build(
                 workspace_root=workspace_root,

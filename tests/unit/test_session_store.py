@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from project_agent.core.types import (
+    AgentRunRecord,
     AutoCompactionState,
     BudgetSnapshot,
     CompactionSummarySnapshot,
@@ -83,6 +84,47 @@ def test_file_session_store_persists_tool_call_messages(tmp_path: Path) -> None:
     store.save("session-1", state)
 
     assert store.load("session-1") == state
+
+
+def test_file_session_store_persists_agent_runs(tmp_path: Path) -> None:
+    store = FileSessionStore(tmp_path)
+    state = SessionState(
+        agent_runs=(
+            AgentRunRecord(
+                agent_id="agent-123",
+                session_id="parent.agent.agent-123",
+                name="researcher",
+                description="Inspect files",
+                kind="worker",
+                status="completed",
+                result_summary="found files",
+            ),
+        )
+    )
+
+    store.save("session-1", state)
+
+    assert store.load("session-1") == state
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"messages": [], "agent_runs": [{"agent_id": "", "session_id": "s", "name": "a", "description": "d", "kind": "worker", "status": "completed"}]}',
+        '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", "name": "a", "description": "d", "kind": "invalid", "status": "completed"}]}',
+        '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", "name": "a", "description": "d", "kind": "worker", "status": "invalid"}]}',
+    ],
+)
+def test_file_session_store_rejects_invalid_agent_runs(
+    tmp_path: Path,
+    payload: str,
+) -> None:
+    store = FileSessionStore(tmp_path)
+    path = tmp_path / "session-1.json"
+    path.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(SessionError, match="failed to load session: session-1"):
+        store.load("session-1")
 
 
 def test_file_session_store_persists_context_management_state(tmp_path: Path) -> None:
@@ -217,3 +259,4 @@ def test_file_session_store_loads_legacy_session_without_context_state(tmp_path:
 
     assert state.messages == (Message(role="user", content="hello"),)
     assert state.context_state is None
+    assert state.agent_runs == ()

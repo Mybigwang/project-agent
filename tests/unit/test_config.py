@@ -102,6 +102,12 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.memory_max_relevant_files == 3
     assert settings.memory_max_relevant_file_chars == 3000
     assert settings.memory_max_manifest_files == 50
+    assert settings.multi_agent_enabled is True
+    assert settings.coordinator_enabled is False
+    assert settings.max_subagents_per_turn == 4
+    assert settings.max_subagent_steps == 12
+    assert settings.max_worker_result_chars == 8000
+    assert settings.allow_recursive_subagents is False
 
 
 def test_load_settings_honors_override_precedence(
@@ -186,6 +192,38 @@ def test_load_settings_honors_phase2_override_precedence(
     assert settings.max_file_read_chars == 800
 
 
+def test_load_settings_honors_multi_agent_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        (
+            "[project_agent]\n"
+            "multi_agent_enabled = false\n"
+            "coordinator_enabled = true\n"
+            "max_subagents_per_turn = 2\n"
+            "max_subagent_steps = 5\n"
+            "max_worker_result_chars = 1000\n"
+            "allow_recursive_subagents = true\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROJECT_AGENT_MAX_SUBAGENTS_PER_TURN", "3")
+
+    settings = load_settings(
+        config_path=config_path,
+        overrides={"max_subagents_per_turn": "6"},
+    )
+
+    assert settings.multi_agent_enabled is False
+    assert settings.coordinator_enabled is True
+    assert settings.max_subagents_per_turn == 6
+    assert settings.max_subagent_steps == 5
+    assert settings.max_worker_result_chars == 1000
+    assert settings.allow_recursive_subagents is True
+
+
 def test_load_settings_raises_on_malformed_config(tmp_path: Path) -> None:
     config_path = tmp_path / "broken.toml"
     config_path.write_text("[project_agent]\nlog_level = [\n", encoding="utf-8")
@@ -222,6 +260,9 @@ def test_load_settings_raises_on_invalid_stream_output(tmp_path: Path) -> None:
         ("command_timeout_seconds = 0\n", "command_timeout_seconds must be > 0"),
         ("max_command_output_chars = 0\n", "max_command_output_chars must be >= 1"),
         ("max_file_read_chars = 0\n", "max_file_read_chars must be >= 1"),
+        ("max_subagents_per_turn = 0\n", "max_subagents_per_turn must be >= 1"),
+        ("max_subagent_steps = 0\n", "max_subagent_steps must be >= 1"),
+        ("max_worker_result_chars = 0\n", "max_worker_result_chars must be >= 1"),
     ],
 )
 def test_load_settings_raises_on_non_positive_phase2_limits(

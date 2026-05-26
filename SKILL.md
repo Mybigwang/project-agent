@@ -378,15 +378,36 @@ skill 组合
 深度限制
 展开大小限制
 CRLF 兼容
+大模型自动决定并触发 skill (Auto Skill Invocation)
+
 还没做
-模型自动决定“该触发哪个 skill”
-根据上下文自动注入 skill
+根据上下文自动注入 skill（目前通过 Prompt Catalog，尚未做动态裁剪注入）
 真正执行 shell interpolation
 远程 skill 源
 条件触发规则
-这一版是一个 稳定的第一阶段显式 skill 系统。
+这一版是一个 稳定的第一阶段显式 skill 与初步大模型自动调用 系统。
 
-12. 最推荐的使用方式
+12. 大模型自动调用 Skill 机制 (Auto Invocation)
+除了命令行显式的 `/<skill-name>` 方式外，目前框架已经实现了**大模型按照上下文自发调用 Skill** 的机制。
+这就使得 Skill 不仅是用户的快捷模板，更是 Agent 可以随时调用的“标准作业程序 (SOP)”。
+
+### 实现原理
+1. **Catalog 注入 (`src/project_agent/runtime/agent.py`)**：
+   在 `_build_skill_catalog_message` 中，系统会把 `SkillRegistry` 里所有的 Skill Catalog 提取出来，生成一段特殊的系统级提示词，告诉模型：
+   ```json
+   Available skills can be selected by returning JSON only in the form {"skill":{"name":"skill-name","arguments":"optional args"}} when a skill clearly matches the request.
+   ```
+2. **拦截与解析 (`src/project_agent/runtime/model_clients.py`)**：
+   如果模型在回答的文本流中输出了含有 `{"skill": ...}` 结构的 JSON，在接收端流式解析的时候（`_parse_skill_call_content`），会把它独立截获并强转为一个 `SkillCall` 数据结构，而不是普通的文本 Message 或者具体的 ToolCall。
+3. **展开与注入 (`src/project_agent/runtime/agent.py`)**：
+   Agent Loop 拿到 `SkillCall` 后，执行 `_apply_skill_call`：
+   - 走 `SkillPromptPreprocessor` 做 `{{args}}` 和环境变量的展开。
+   - 封装为 `role="system"` 的新的 `Message`。
+   - 这段新的 Prompt (`Activated skill: ...`) 会被 push 回消息队列，让模型在下一轮对话带着这段展开后的、具备强大执行规则的 prompt 去继续思考。
+
+这样，如果此时面临 Bug 修复，大模型发现有了 `fix-bug` 这个 Skill，它就会直接输出 `{"skill": {"name":"fix-bug", "arguments":"..."}}` 来拉取这个 SOP 规范自己的解题路径。
+
+13. 最推荐的使用方式
 我建议你现在先把它当成一组“可复用命令模板”来用。
 
 比如你可以做这些 skill：

@@ -62,6 +62,12 @@ class Settings:
     memory_max_relevant_files: int
     memory_max_relevant_file_chars: int
     memory_max_manifest_files: int
+    multi_agent_enabled: bool
+    coordinator_enabled: bool
+    max_subagents_per_turn: int
+    max_subagent_steps: int
+    max_worker_result_chars: int
+    allow_recursive_subagents: bool
 
 
 def load_settings(
@@ -453,6 +459,60 @@ def load_settings(
             ),
         )
     )
+    multi_agent_enabled = _parse_bool(
+        override_values.get(
+            "multi_agent_enabled",
+            os.getenv(
+                "PROJECT_AGENT_MULTI_AGENT_ENABLED",
+                config_values.get("multi_agent_enabled", "true"),
+            ),
+        )
+    )
+    coordinator_enabled = _parse_bool(
+        override_values.get(
+            "coordinator_enabled",
+            os.getenv(
+                "PROJECT_AGENT_COORDINATOR_ENABLED",
+                config_values.get("coordinator_enabled", "false"),
+            ),
+        )
+    )
+    max_subagents_per_turn = int(
+        override_values.get(
+            "max_subagents_per_turn",
+            os.getenv(
+                "PROJECT_AGENT_MAX_SUBAGENTS_PER_TURN",
+                config_values.get("max_subagents_per_turn", "4"),
+            ),
+        )
+    )
+    max_subagent_steps = int(
+        override_values.get(
+            "max_subagent_steps",
+            os.getenv(
+                "PROJECT_AGENT_MAX_SUBAGENT_STEPS",
+                config_values.get("max_subagent_steps", "12"),
+            ),
+        )
+    )
+    max_worker_result_chars = int(
+        override_values.get(
+            "max_worker_result_chars",
+            os.getenv(
+                "PROJECT_AGENT_MAX_WORKER_RESULT_CHARS",
+                config_values.get("max_worker_result_chars", "8000"),
+            ),
+        )
+    )
+    allow_recursive_subagents = _parse_bool(
+        override_values.get(
+            "allow_recursive_subagents",
+            os.getenv(
+                "PROJECT_AGENT_ALLOW_RECURSIVE_SUBAGENTS",
+                config_values.get("allow_recursive_subagents", "false"),
+            ),
+        )
+    )
 
     _validate_log_level(log_level)
     _validate_max_steps(max_steps)
@@ -483,6 +543,11 @@ def load_settings(
     _validate_positive_int(memory_max_relevant_files, "memory_max_relevant_files")
     _validate_positive_int(memory_max_relevant_file_chars, "memory_max_relevant_file_chars")
     _validate_positive_int(memory_max_manifest_files, "memory_max_manifest_files")
+    _validate_positive_int(max_subagents_per_turn, "max_subagents_per_turn")
+    if max_subagents_per_turn > 16:
+        raise ConfigurationError("max_subagents_per_turn must be <= 16")
+    _validate_positive_int(max_subagent_steps, "max_subagent_steps")
+    _validate_positive_int(max_worker_result_chars, "max_worker_result_chars")
     _validate_path_within_workspace(memory_dir, workspace_root, "memory_dir")
     _validate_non_empty_string(context_profile, "context_profile")
     _validate_non_empty_string(context_profile_version, "context_profile_version")
@@ -536,6 +601,12 @@ def load_settings(
         memory_max_relevant_files=memory_max_relevant_files,
         memory_max_relevant_file_chars=memory_max_relevant_file_chars,
         memory_max_manifest_files=memory_max_manifest_files,
+        multi_agent_enabled=multi_agent_enabled,
+        coordinator_enabled=coordinator_enabled,
+        max_subagents_per_turn=max_subagents_per_turn,
+        max_subagent_steps=max_subagent_steps,
+        max_worker_result_chars=max_worker_result_chars,
+        allow_recursive_subagents=allow_recursive_subagents,
     )
 
 
