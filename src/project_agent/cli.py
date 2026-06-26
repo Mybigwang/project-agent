@@ -115,7 +115,9 @@ def doctor(ctx: typer.Context) -> None:
     typer.echo(f"max_subagents_per_turn={settings.max_subagents_per_turn}")
     typer.echo(f"max_subagent_steps={settings.max_subagent_steps}")
     typer.echo(f"max_worker_result_chars={settings.max_worker_result_chars}")
-    typer.echo(f"allow_recursive_subagents={settings.allow_recursive_subagents}")
+    typer.echo(f"multi_agent_strict_task_specs={settings.multi_agent_strict_task_specs}")
+    typer.echo("multi_agent_roles=explore,plan,worker,verification,generalPurpose")
+    typer.echo("recursive_subagents_supported=False")
 
 
 @app.command()
@@ -372,6 +374,9 @@ def _run_once(
                 permission_policy=permission_policy,
                 approval_callback=approval_callback if interactive_approval else None,
                 parent_user_input=actual_input,
+                default_role="worker",
+                strict_task_specs=settings.multi_agent_strict_task_specs,
+                parent_depth=0,
             ),
         ]
     result: RunResult | MultiAgentRunResult

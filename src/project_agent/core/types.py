@@ -7,7 +7,9 @@ from typing import Any, Literal
 
 TaskStatus = Literal["pending", "in_progress", "completed", "blocked"]
 AgentKind = Literal["subagent", "worker", "coordinator"]
+AgentRole = Literal["explore", "plan", "worker", "verification", "coordinator", "generalPurpose"]
 AgentRunStatus = Literal["created", "running", "completed", "failed", "cancelled"]
+AgentVerdict = Literal["PASS", "FAIL", "PARTIAL"]
 
 
 @dataclass(frozen=True)
@@ -115,15 +117,29 @@ class ContextManagementState:
 
 
 @dataclass(frozen=True)
+class AgentStructuredResult:
+    summary: str
+    evidence: tuple[str, ...] = ()
+    touched_files: tuple[str, ...] = ()
+    commands_run: tuple[str, ...] = ()
+    open_questions: tuple[str, ...] = ()
+    verdict: AgentVerdict | None = None
+
+
+@dataclass(frozen=True)
 class AgentSpec:
     name: str | None
     description: str
     prompt: str
     kind: AgentKind = "subagent"
+    role: AgentRole = "generalPurpose"
     subagent_type: str | None = None
     model: str | None = None
     run_in_background: bool = False
     parent_session_id: str | None = None
+    target_files: tuple[str, ...] = ()
+    verification_commands: tuple[str, ...] = ()
+    depth: int = 0
 
 
 @dataclass(frozen=True)
@@ -134,8 +150,14 @@ class AgentRunRecord:
     description: str
     kind: AgentKind
     status: AgentRunStatus
+    role: AgentRole = "generalPurpose"
+    readonly: bool = False
     result_summary: str | None = None
     error: str | None = None
+    structured_result: AgentStructuredResult | None = None
+    verdict: AgentVerdict | None = None
+    parent_session_id: str | None = None
+    depth: int = 1
 
 
 @dataclass(frozen=True)
@@ -144,6 +166,9 @@ class AgentNotification:
     status: AgentRunStatus
     summary: str
     result: str
+    role: AgentRole = "generalPurpose"
+    verdict: AgentVerdict | None = None
+    structured_result: AgentStructuredResult | None = None
     usage: str | None = None
 
 

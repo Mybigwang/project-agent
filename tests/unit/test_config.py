@@ -107,7 +107,7 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.max_subagents_per_turn == 4
     assert settings.max_subagent_steps == 12
     assert settings.max_worker_result_chars == 8000
-    assert settings.allow_recursive_subagents is False
+    assert settings.multi_agent_strict_task_specs is True
 
 
 def test_load_settings_honors_override_precedence(
@@ -205,7 +205,7 @@ def test_load_settings_honors_multi_agent_overrides(
             "max_subagents_per_turn = 2\n"
             "max_subagent_steps = 5\n"
             "max_worker_result_chars = 1000\n"
-            "allow_recursive_subagents = true\n"
+            "multi_agent_strict_task_specs = false\n"
         ),
         encoding="utf-8",
     )
@@ -221,7 +221,7 @@ def test_load_settings_honors_multi_agent_overrides(
     assert settings.max_subagents_per_turn == 6
     assert settings.max_subagent_steps == 5
     assert settings.max_worker_result_chars == 1000
-    assert settings.allow_recursive_subagents is True
+    assert settings.multi_agent_strict_task_specs is False
 
 
 def test_load_settings_raises_on_malformed_config(tmp_path: Path) -> None:

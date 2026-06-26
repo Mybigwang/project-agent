@@ -7,6 +7,7 @@ from pathlib import Path
 
 from project_agent.core.types import (
     AgentRunRecord,
+    AgentStructuredResult,
     AutoCompactionState,
     BudgetSnapshot,
     CompactionSummarySnapshot,
@@ -23,7 +24,9 @@ SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 MESSAGE_ROLES = frozenset({"system", "user", "assistant", "tool"})
 TASK_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked"})
 AGENT_KINDS = frozenset({"subagent", "worker", "coordinator"})
+AGENT_ROLES = frozenset({"explore", "plan", "worker", "verification", "coordinator", "generalPurpose"})
 AGENT_RUN_STATUSES = frozenset({"created", "running", "completed", "failed", "cancelled"})
+AGENT_VERDICTS = frozenset({"PASS", "FAIL", "PARTIAL"})
 MAX_TASKS_PER_PLAN = 50
 MAX_TASK_FIELD_CHARS = 2000
 MAX_TASK_DEPENDENCIES = 20
@@ -148,8 +151,27 @@ def _serialize_agent_run_record(record: AgentRunRecord) -> dict[str, object]:
         "description": record.description,
         "kind": record.kind,
         "status": record.status,
+        "role": record.role,
+        "readonly": record.readonly,
         "result_summary": record.result_summary,
         "error": record.error,
+        "structured_result": _serialize_agent_structured_result(record.structured_result),
+        "verdict": record.verdict,
+        "parent_session_id": record.parent_session_id,
+        "depth": record.depth,
+    }
+
+
+def _serialize_agent_structured_result(result: AgentStructuredResult | None) -> dict[str, object] | None:
+    if result is None:
+        return None
+    return {
+        "summary": result.summary,
+        "evidence": list(result.evidence),
+        "touched_files": list(result.touched_files),
+        "commands_run": list(result.commands_run),
+        "open_questions": list(result.open_questions),
+        "verdict": result.verdict,
     }
 
 
@@ -162,8 +184,14 @@ def _deserialize_agent_run_record(payload: object) -> AgentRunRecord:
     description = payload["description"]
     kind = payload["kind"]
     status = payload["status"]
+    role = payload["role"]
+    readonly = payload["readonly"]
     result_summary = payload.get("result_summary")
     error = payload.get("error")
+    structured_result = _deserialize_agent_structured_result(payload.get("structured_result"))
+    verdict = payload.get("verdict")
+    parent_session_id = payload.get("parent_session_id")
+    depth = payload["depth"]
     for field_name, value in {
         "agent_id": agent_id,
         "session_id": session_id,
@@ -178,10 +206,20 @@ def _deserialize_agent_run_record(payload: object) -> AgentRunRecord:
         raise ValueError("agent run kind is invalid")
     if status not in AGENT_RUN_STATUSES:
         raise ValueError("agent run status is invalid")
+    if role not in AGENT_ROLES:
+        raise ValueError("agent run role is invalid")
+    if not isinstance(readonly, bool):
+        raise ValueError("agent run readonly must be a boolean")
     if result_summary is not None and not isinstance(result_summary, str):
         raise ValueError("agent run result_summary must be a string")
     if error is not None and not isinstance(error, str):
         raise ValueError("agent run error must be a string")
+    if verdict is not None and verdict not in AGENT_VERDICTS:
+        raise ValueError("agent run verdict is invalid")
+    if parent_session_id is not None and not isinstance(parent_session_id, str):
+        raise ValueError("agent run parent_session_id must be a string")
+    if not isinstance(depth, int) or depth < 0:
+        raise ValueError("agent run depth must be a non-negative integer")
     if result_summary is not None and len(result_summary) > MAX_AGENT_FIELD_CHARS:
         raise ValueError("agent run result_summary is too long")
     if error is not None and len(error) > MAX_AGENT_FIELD_CHARS:
@@ -193,9 +231,55 @@ def _deserialize_agent_run_record(payload: object) -> AgentRunRecord:
         description=description,
         kind=kind,
         status=status,
+        role=role,
+        readonly=readonly,
         result_summary=result_summary,
         error=error,
+        structured_result=structured_result,
+        verdict=verdict,
+        parent_session_id=parent_session_id,
+        depth=depth,
     )
+
+
+def _deserialize_agent_structured_result(payload: object) -> AgentStructuredResult | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ValueError("agent structured_result must be an object")
+    summary = payload["summary"]
+    evidence = _deserialize_string_tuple(payload.get("evidence", []), "evidence")
+    touched_files = _deserialize_string_tuple(payload.get("touched_files", []), "touched_files")
+    commands_run = _deserialize_string_tuple(payload.get("commands_run", []), "commands_run")
+    open_questions = _deserialize_string_tuple(payload.get("open_questions", []), "open_questions")
+    verdict = payload.get("verdict")
+    if not isinstance(summary, str):
+        raise ValueError("agent structured_result summary must be a string")
+    if len(summary) > MAX_AGENT_FIELD_CHARS:
+        raise ValueError("agent structured_result summary is too long")
+    if verdict is not None and verdict not in AGENT_VERDICTS:
+        raise ValueError("agent structured_result verdict is invalid")
+    return AgentStructuredResult(
+        summary=summary,
+        evidence=evidence,
+        touched_files=touched_files,
+        commands_run=commands_run,
+        open_questions=open_questions,
+        verdict=verdict,
+    )
+
+
+def _deserialize_string_tuple(payload: object, field_name: str) -> tuple[str, ...]:
+    if not isinstance(payload, list):
+        raise ValueError(f"agent structured_result {field_name} must be a list")
+    values: list[str] = []
+    for item in payload:
+        if not isinstance(item, str):
+            raise ValueError(f"agent structured_result {field_name} entries must be strings")
+        if len(item) > MAX_AGENT_FIELD_CHARS:
+            raise ValueError(f"agent structured_result {field_name} entry is too long")
+        values.append(item)
+    return tuple(values)
 
 
 def _deserialize_task(payload: object) -> Task:

@@ -67,7 +67,7 @@ class Settings:
     max_subagents_per_turn: int
     max_subagent_steps: int
     max_worker_result_chars: int
-    allow_recursive_subagents: bool
+    multi_agent_strict_task_specs: bool
 
 
 def load_settings(
@@ -504,12 +504,12 @@ def load_settings(
             ),
         )
     )
-    allow_recursive_subagents = _parse_bool(
+    multi_agent_strict_task_specs = _parse_bool(
         override_values.get(
-            "allow_recursive_subagents",
+            "multi_agent_strict_task_specs",
             os.getenv(
-                "PROJECT_AGENT_ALLOW_RECURSIVE_SUBAGENTS",
-                config_values.get("allow_recursive_subagents", "false"),
+                "PROJECT_AGENT_MULTI_AGENT_STRICT_TASK_SPECS",
+                config_values.get("multi_agent_strict_task_specs", "true"),
             ),
         )
     )
@@ -606,7 +606,7 @@ def load_settings(
         max_subagents_per_turn=max_subagents_per_turn,
         max_subagent_steps=max_subagent_steps,
         max_worker_result_chars=max_worker_result_chars,
-        allow_recursive_subagents=allow_recursive_subagents,
+        multi_agent_strict_task_specs=multi_agent_strict_task_specs,
     )
 
 

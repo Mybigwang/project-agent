@@ -17,7 +17,19 @@ class CapturingModelClient:
     def __init__(self, response: Message | tuple[ToolCall, ...] | None = None) -> None:
         self.calls: tuple[tuple[Message, ...], ...] = ()
         self.tools: tuple[tuple[str, ...], ...] = ()
-        self._response = response or Message(role="assistant", content="worker done")
+        self._response = response or Message(
+            role="assistant",
+            content=(
+                "<agent-result>\n"
+                "<summary>worker done</summary>\n"
+                "<evidence>\n- src/project_agent/runtime/multi_agent.py\n</evidence>\n"
+                "<touched-files></touched-files>\n"
+                "<commands-run></commands-run>\n"
+                "<open-questions></open-questions>\n"
+                "<verdict></verdict>\n"
+                "</agent-result>"
+            ),
+        )
 
     def complete(
         self,
@@ -51,7 +63,10 @@ class CoordinatorModelClient:
             return (
                 ToolCall(
                     name="agent",
-                    arguments={"description": "Research", "prompt": "inspect files"},
+                    arguments={
+                        "description": "Research",
+                        "prompt": "inspect src/project_agent/runtime/multi_agent.py",
+                    },
                     call_id="call-agent",
                 ),
             )
@@ -124,7 +139,10 @@ def test_run_subagent_uses_child_session_and_records_parent(tmp_path: Path) -> N
 
     assert record.status == "completed"
     assert record.session_id.startswith("parent.agent.")
-    assert store.load(record.session_id).messages[-1].content == "worker done"
+    assert "worker done" in store.load(record.session_id).messages[-1].content
+    assert record.role == "generalPurpose"
+    assert record.structured_result is not None
+    assert record.structured_result.summary == "worker done"
     assert store.load("parent").agent_runs == (record,)
 
 
@@ -136,7 +154,7 @@ def test_run_subagent_receives_repository_context(tmp_path: Path) -> None:
         spec=AgentSpec(
             name=None,
             description="Inspect",
-            prompt="inspect",
+            prompt="inspect src/project_agent/runtime/multi_agent.py",
             kind="worker",
             parent_session_id="parent",
         ),
@@ -148,7 +166,7 @@ def test_run_subagent_receives_repository_context(tmp_path: Path) -> None:
         repository_context_builder=StaticRepositoryContextBuilder(),
     )
 
-    assert model_client.calls[0][0].content.startswith("You are a focused Project Agent subagent")
+    assert model_client.calls[0][0].content.startswith("Fork started")
     assert model_client.calls[0][1].content == "repo context"
 
 
@@ -172,7 +190,7 @@ def test_subagent_tool_ignores_stale_team_name_argument(tmp_path: Path) -> None:
 
     result = tool.run(
         workspace_root=tmp_path,
-        arguments={"description": "Research", "prompt": "inspect", "team_name": "research"},
+        arguments={"description": "Research", "prompt": "inspect src/project_agent/runtime/multi_agent.py", "team_name": "research"},
     )
 
     assert result.is_error is False
@@ -195,13 +213,15 @@ def test_subagent_tool_returns_structured_result(tmp_path: Path) -> None:
 
     result = tool.run(
         workspace_root=tmp_path,
-        arguments={"description": "Research", "prompt": "inspect"},
+        arguments={"description": "Research", "prompt": "inspect src/project_agent/runtime/multi_agent.py"},
     )
 
     assert result.is_error is False
     assert "<task-notification>" in result.content
     assert result.data is not None
     assert result.data["status"] == "completed"
+    assert result.data["role"] == "generalPurpose"
+    assert result.data["evidence"] == ["src/project_agent/runtime/multi_agent.py"]
 
 
 def test_subagent_tool_rejects_background(tmp_path: Path) -> None:
@@ -221,7 +241,7 @@ def test_subagent_tool_rejects_background(tmp_path: Path) -> None:
         workspace_root=tmp_path,
         arguments={
             "description": "Research",
-            "prompt": "inspect",
+            "prompt": "inspect src/project_agent/runtime/multi_agent.py",
             "run_in_background": True,
         },
     )
@@ -247,7 +267,7 @@ def test_subagent_tool_does_not_pass_itself_to_worker(tmp_path: Path) -> None:
 
     result = tool.run(
         workspace_root=tmp_path,
-        arguments={"description": "Research", "prompt": "inspect"},
+        arguments={"description": "Research", "prompt": "inspect src/project_agent/runtime/multi_agent.py"},
     )
 
     assert result.is_error is False
@@ -302,11 +322,253 @@ def test_worker_result_escapes_task_notification_text(tmp_path: Path) -> None:
 
     result = tool.run(
         workspace_root=tmp_path,
-        arguments={"description": "Research", "prompt": "inspect"},
+        arguments={"description": "Research", "prompt": "inspect src/project_agent/runtime/multi_agent.py"},
     )
 
     assert "&lt;/result&gt;&lt;status&gt;failed&lt;/status&gt;" in result.content
     assert "<result trust=\"untrusted-worker-output\">" in result.content
+
+
+def test_subagent_tool_rejects_unknown_role(tmp_path: Path) -> None:
+    tool = SubagentTool(
+        orchestrator=MultiAgentOrchestrator(),
+        parent_session_id="parent",
+        model_client=CapturingModelClient(),
+        tools=[EchoTool()],
+        session_store=InMemorySessionStore(),
+        workspace_root=tmp_path,
+        max_steps=3,
+        max_subagents=2,
+        max_worker_result_chars=8000,
+    )
+
+    result = tool.run(
+        workspace_root=tmp_path,
+        arguments={
+            "description": "Research",
+            "prompt": "inspect src/project_agent/runtime/multi_agent.py",
+            "subagent_type": "unknown",
+        },
+    )
+
+    assert result.is_error is True
+    assert result.error_code == "role_not_allowed"
+
+
+def test_subagent_tool_rejects_lazy_general_purpose_prompt(tmp_path: Path) -> None:
+    tool = SubagentTool(
+        orchestrator=MultiAgentOrchestrator(),
+        parent_session_id="parent",
+        model_client=CapturingModelClient(),
+        tools=[EchoTool()],
+        session_store=InMemorySessionStore(),
+        workspace_root=tmp_path,
+        max_steps=3,
+        max_subagents=2,
+        max_worker_result_chars=8000,
+    )
+
+    result = tool.run(
+        workspace_root=tmp_path,
+        arguments={"description": "Improve", "prompt": "make it better"},
+    )
+
+    assert result.is_error is True
+    assert result.error_code == "task_spec_too_vague"
+
+
+def test_subagent_tool_rejects_lazy_worker_prompt(tmp_path: Path) -> None:
+    tool = SubagentTool(
+        orchestrator=MultiAgentOrchestrator(),
+        parent_session_id="parent",
+        model_client=CapturingModelClient(),
+        tools=[EchoTool()],
+        session_store=InMemorySessionStore(),
+        workspace_root=tmp_path,
+        max_steps=3,
+        max_subagents=2,
+        max_worker_result_chars=8000,
+        default_role="worker",
+    )
+
+    result = tool.run(
+        workspace_root=tmp_path,
+        arguments={"description": "Fix", "prompt": "fix it"},
+    )
+
+    assert result.is_error is True
+    assert result.error_code == "task_spec_too_vague"
+
+
+def test_subagent_tool_rejects_recursive_use(tmp_path: Path) -> None:
+    tool = SubagentTool(
+        orchestrator=MultiAgentOrchestrator(),
+        parent_session_id="parent",
+        model_client=CapturingModelClient(),
+        tools=[EchoTool()],
+        session_store=InMemorySessionStore(),
+        workspace_root=tmp_path,
+        max_steps=3,
+        max_subagents=2,
+        max_worker_result_chars=8000,
+        parent_depth=1,
+    )
+
+    result = tool.run(
+        workspace_root=tmp_path,
+        arguments={
+            "description": "Research",
+            "prompt": "inspect src/project_agent/runtime/multi_agent.py",
+        },
+    )
+
+    assert result.is_error is True
+    assert result.error_code == "recursive_subagents_denied"
+
+
+def test_verification_role_allows_safe_command(tmp_path: Path) -> None:
+    class SafeCommandModelClient:
+        name = "safe-command-model"
+
+        def complete(
+            self,
+            *,
+            messages: Sequence[Message],
+            tools: Sequence[object],
+            stream_callback: object | None = None,
+        ) -> tuple[ToolCall, ...] | Message:
+            del tools, stream_callback
+            if not any(message.role == "tool" for message in messages):
+                return (
+                    ToolCall(
+                        name="run_command",
+                        arguments={"argv": ["python", "-m", "pytest"]},
+                        call_id="call-command",
+                    ),
+                )
+            return Message(
+                role="assistant",
+                content=(
+                    "<agent-result>\n"
+                    "<summary>tests ran</summary>\n"
+                    "<evidence></evidence>\n"
+                    "<touched-files></touched-files>\n"
+                    "<commands-run>\n- python -m pytest\n</commands-run>\n"
+                    "<open-questions></open-questions>\n"
+                    "<verdict>PASS</verdict>\n"
+                    "</agent-result>"
+                ),
+            )
+
+    class CommandTool:
+        name = "run_command"
+        description = "Run command"
+        input_schema = {"type": "object"}
+        is_read_only = False
+        permission_category = ToolPermissionCategory.EXECUTE
+
+        def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult:
+            del workspace_root, arguments
+            return ToolResult(name=self.name, content="ran")
+
+    record = MultiAgentOrchestrator().run_subagent(
+        spec=AgentSpec(
+            name=None,
+            description="Verify",
+            prompt="verify tests for src/project_agent/runtime/multi_agent.py",
+            kind="worker",
+            role="verification",
+            parent_session_id="parent",
+        ),
+        model_client=SafeCommandModelClient(),
+        tools=[CommandTool()],
+        session_store=InMemorySessionStore(),
+        workspace_root=tmp_path,
+        max_steps=3,
+        permission_policy=PermissionPolicy(mode=PermissionMode.DONT_ASK, rules=()),
+    )
+
+    assert record.status == "completed"
+    assert record.verdict == "PASS"
+
+
+def test_verification_role_rejects_unsafe_command(tmp_path: Path) -> None:
+    class UnsafeCommandModelClient:
+        name = "unsafe-command-model"
+
+        def complete(
+            self,
+            *,
+            messages: Sequence[Message],
+            tools: Sequence[object],
+            stream_callback: object | None = None,
+        ) -> tuple[ToolCall, ...]:
+            del messages, tools, stream_callback
+            return (
+                ToolCall(
+                    name="run_command",
+                    arguments={"argv": ["python", "-c", "open('x', 'w').write('bad')"]},
+                    call_id="call-command",
+                ),
+            )
+
+    class CommandTool:
+        name = "run_command"
+        description = "Run command"
+        input_schema = {"type": "object"}
+        is_read_only = False
+        permission_category = ToolPermissionCategory.EXECUTE
+
+        def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult:
+            del workspace_root, arguments
+            return ToolResult(name=self.name, content="ran")
+
+    record = MultiAgentOrchestrator().run_subagent(
+        spec=AgentSpec(
+            name=None,
+            description="Verify",
+            prompt="verify tests for src/project_agent/runtime/multi_agent.py",
+            kind="worker",
+            role="verification",
+            parent_session_id="parent",
+        ),
+        model_client=UnsafeCommandModelClient(),
+        tools=[CommandTool()],
+        session_store=InMemorySessionStore(),
+        workspace_root=tmp_path,
+        max_steps=3,
+        permission_policy=PermissionPolicy(mode=PermissionMode.DEFAULT, rules=()),
+    )
+
+    assert record.status == "completed"
+    assert record.verdict == "PARTIAL"
+    assert "safe verification commands" in (record.result_summary or "")
+
+
+def test_long_worker_result_notification_keeps_envelope(tmp_path: Path) -> None:
+    store = InMemorySessionStore()
+    long_result = "x" * 5000
+    tool = SubagentTool(
+        orchestrator=MultiAgentOrchestrator(),
+        parent_session_id="parent",
+        model_client=CapturingModelClient(Message(role="assistant", content=long_result)),
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        max_subagents=2,
+        max_worker_result_chars=200,
+        strict_task_specs=False,
+    )
+
+    result = tool.run(
+        workspace_root=tmp_path,
+        arguments={"description": "Long", "prompt": "return long result"},
+    )
+
+    assert result.content.startswith("<task-notification>")
+    assert result.content.endswith("</task-notification>")
+    assert "[truncated]" in result.content
 
 
 def test_long_worker_result_is_clamped_for_parent_session(tmp_path: Path) -> None:
@@ -317,7 +579,7 @@ def test_long_worker_result_is_clamped_for_parent_session(tmp_path: Path) -> Non
         spec=AgentSpec(
             name=None,
             description="Long result",
-            prompt="return long result",
+            prompt="return long result for src/project_agent/runtime/multi_agent.py",
             kind="worker",
             parent_session_id="parent",
         ),
@@ -349,11 +611,11 @@ def test_subagent_tool_enforces_max_subagents(tmp_path: Path) -> None:
 
     first = tool.run(
         workspace_root=tmp_path,
-        arguments={"description": "Research", "prompt": "inspect"},
+        arguments={"description": "Research", "prompt": "inspect src/project_agent/runtime/multi_agent.py"},
     )
     second = tool.run(
         workspace_root=tmp_path,
-        arguments={"description": "Research again", "prompt": "inspect"},
+        arguments={"description": "Research again", "prompt": "inspect src/project_agent/runtime/multi_agent.py"},
     )
 
     assert first.is_error is False
@@ -361,12 +623,58 @@ def test_subagent_tool_enforces_max_subagents(tmp_path: Path) -> None:
     assert second.error_code == "max_subagents_exceeded"
 
 
+def test_explore_role_denies_write_tool(tmp_path: Path) -> None:
+    record = MultiAgentOrchestrator().run_subagent(
+        spec=AgentSpec(
+            name=None,
+            description="Explore",
+            prompt="inspect src/project_agent/runtime/multi_agent.py",
+            kind="worker",
+            role="explore",
+            parent_session_id="parent",
+        ),
+        model_client=WriteToolModelClient(),
+        tools=[WriteTool()],
+        session_store=InMemorySessionStore(),
+        workspace_root=tmp_path,
+        max_steps=3,
+        permission_policy=PermissionPolicy(mode=PermissionMode.DEFAULT, rules=()),
+    )
+
+    assert record.status == "completed"
+    assert record.readonly is True
+    assert "plan mode only allows read and search tools" in (record.result_summary or "")
+
+
+def test_verification_role_denies_write_tool_and_sets_partial_verdict(tmp_path: Path) -> None:
+    record = MultiAgentOrchestrator().run_subagent(
+        spec=AgentSpec(
+            name=None,
+            description="Verify",
+            prompt="verify tests for src/project_agent/runtime/multi_agent.py",
+            kind="worker",
+            role="verification",
+            parent_session_id="parent",
+        ),
+        model_client=WriteToolModelClient(),
+        tools=[WriteTool()],
+        session_store=InMemorySessionStore(),
+        workspace_root=tmp_path,
+        max_steps=3,
+        permission_policy=PermissionPolicy(mode=PermissionMode.DEFAULT, rules=()),
+    )
+
+    assert record.status == "completed"
+    assert record.verdict == "PARTIAL"
+    assert "verification agents cannot write files" in (record.result_summary or "")
+
+
 def test_worker_permission_policy_is_applied(tmp_path: Path) -> None:
     record = MultiAgentOrchestrator().run_subagent(
         spec=AgentSpec(
             name=None,
             description="Write",
-            prompt="write",
+            prompt="write src/project_agent/runtime/multi_agent.py",
             kind="worker",
             parent_session_id="parent",
         ),

@@ -6,6 +6,7 @@ import pytest
 
 from project_agent.core.types import (
     AgentRunRecord,
+    AgentStructuredResult,
     AutoCompactionState,
     BudgetSnapshot,
     CompactionSummarySnapshot,
@@ -97,7 +98,16 @@ def test_file_session_store_persists_agent_runs(tmp_path: Path) -> None:
                 description="Inspect files",
                 kind="worker",
                 status="completed",
+                role="explore",
+                readonly=True,
                 result_summary="found files",
+                structured_result=AgentStructuredResult(
+                    summary="found files",
+                    evidence=("src/project_agent/runtime/multi_agent.py",),
+                    touched_files=("src/project_agent/runtime/multi_agent.py",),
+                ),
+                parent_session_id="parent",
+                depth=1,
             ),
         )
     )
@@ -110,9 +120,11 @@ def test_file_session_store_persists_agent_runs(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "payload",
     [
-        '{"messages": [], "agent_runs": [{"agent_id": "", "session_id": "s", "name": "a", "description": "d", "kind": "worker", "status": "completed"}]}',
-        '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", "name": "a", "description": "d", "kind": "invalid", "status": "completed"}]}',
-        '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", "name": "a", "description": "d", "kind": "worker", "status": "invalid"}]}',
+        '{"messages": [], "agent_runs": [{"agent_id": "", "session_id": "s", "name": "a", "description": "d", "kind": "worker", "status": "completed", "role": "worker", "readonly": false, "depth": 1}]}',
+        '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", "name": "a", "description": "d", "kind": "invalid", "status": "completed", "role": "worker", "readonly": false, "depth": 1}]}',
+        '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", "name": "a", "description": "d", "kind": "worker", "status": "invalid", "role": "worker", "readonly": false, "depth": 1}]}',
+        '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", "name": "a", "description": "d", "kind": "worker", "status": "completed", "role": "invalid", "readonly": false, "depth": 1}]}',
+        '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", "name": "a", "description": "d", "kind": "worker", "status": "completed", "role": "worker", "readonly": false, "verdict": "MAYBE", "depth": 1}]}',
     ],
 )
 def test_file_session_store_rejects_invalid_agent_runs(

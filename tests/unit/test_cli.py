@@ -75,7 +75,7 @@ def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "max_subagents_per_turn": 4,
         "max_subagent_steps": 12,
         "max_worker_result_chars": 8000,
-        "allow_recursive_subagents": False,
+        "multi_agent_strict_task_specs": True,
         **overrides,
     }
     return Settings(**values)
@@ -112,6 +112,8 @@ def test_doctor_command_uses_cli_overrides(tmp_path: Path) -> None:
     assert "multi_agent_enabled=True" in result.stdout
     assert "coordinator_enabled=False" in result.stdout
     assert "max_subagents_per_turn=4" in result.stdout
+    assert "multi_agent_roles=explore,plan,worker,verification,generalPurpose" in result.stdout
+    assert "recursive_subagents_supported=False" in result.stdout
 
 
 def test_run_command_executes_runtime(tmp_path: Path) -> None:
