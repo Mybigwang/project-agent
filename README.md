@@ -38,6 +38,7 @@ Supported environment variables:
 - `PROJECT_AGENT_DEFAULT_MODEL`
 - `PROJECT_AGENT_MODEL_BASE_URL`
 - `PROJECT_AGENT_API_KEY`
+- `PROJECT_AGENT_PROMPT_CACHE` (`auto`, `on`, or `off`; default `auto`)
 - `PROJECT_AGENT_ENVIRONMENT`
 
 For real model calls, configure any OpenAI-compatible chat completions endpoint:
@@ -48,6 +49,13 @@ export PROJECT_AGENT_API_KEY="your-api-key"
 export PROJECT_AGENT_DEFAULT_MODEL="your-model"
 project-agent run --prompt "summarize this repository"
 ```
+
+Prompt caching defaults to `auto`. In `auto` mode, OpenAI-compatible Claude
+requests routed through OpenRouter send top-level
+`cache_control = {"type": "ephemeral"}` to enable read/write prompt caching.
+OpenAI endpoints keep their native automatic prompt caching behavior and do not
+receive an extra `cache_control` field. Set `PROJECT_AGENT_PROMPT_CACHE=on` to
+force the field, or `off` to suppress it.
 
 If `PROJECT_AGENT_MODEL_BASE_URL` and `PROJECT_AGENT_API_KEY` are unset, the CLI uses the built-in mock model.
 

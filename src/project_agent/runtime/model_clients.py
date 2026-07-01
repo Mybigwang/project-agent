@@ -19,6 +19,7 @@ from project_agent.errors import AgentError
 MAX_MODEL_RESPONSE_BYTES = 16_000_000
 MAX_TOOL_CALLS_PER_RESPONSE = 20
 SKILL_CALL_KEY = "skill"
+PROMPT_CACHE_MODES = frozenset({"auto", "on", "off"})
 _MEMORY_MANIFEST_PATTERN = re.compile(r"^- path: (?P<path>.+)$", re.MULTILINE)
 
 
@@ -63,11 +64,16 @@ class OpenAICompatibleModelClient(StreamingModelClient):
         api_key: str,
         model: str,
         timeout_seconds: float = 600.0,
+        prompt_cache: str = "auto",
     ) -> None:
+        normalized_prompt_cache = prompt_cache.strip().lower()
+        if normalized_prompt_cache not in PROMPT_CACHE_MODES:
+            raise AgentError(f"invalid prompt_cache mode: {prompt_cache}")
         self.name = model
         self._base_url = _validate_base_url(base_url)
         self._api_key = api_key
         self._timeout_seconds = timeout_seconds
+        self._prompt_cache = normalized_prompt_cache
 
     def complete(
         self,
@@ -80,6 +86,7 @@ class OpenAICompatibleModelClient(StreamingModelClient):
             "model": self.name,
             "messages": tuple(_serialize_message(message) for message in messages),
         }
+        payload = self._apply_prompt_cache(payload)
         serialized_tools = _serialize_tools(tools)
         if serialized_tools:
             payload = {**payload, "tools": serialized_tools, "tool_choice": "auto"}
@@ -136,10 +143,26 @@ class OpenAICompatibleModelClient(StreamingModelClient):
             "messages": tuple(_serialize_message(message) for message in messages),
             "stream": True,
         }
+        payload = self._apply_prompt_cache(payload)
         serialized_tools = _serialize_tools(tools)
         if serialized_tools:
             payload = {**payload, "tools": serialized_tools, "tool_choice": "auto"}
         return self._stream_chat_completions(payload)
+
+    def _apply_prompt_cache(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self._should_send_prompt_cache_control():
+            return payload
+        return {**payload, "cache_control": {"type": "ephemeral"}}
+
+    def _should_send_prompt_cache_control(self) -> bool:
+        if self._prompt_cache == "off":
+            return False
+        if self._prompt_cache == "on":
+            return True
+        return _supports_explicit_prompt_cache(
+            base_url=self._base_url,
+            model=self.name,
+        )
 
     def _stream_chat_completions(self, payload: dict[str, object]) -> Iterable[str]:
         body = json.dumps(payload).encode("utf-8")
@@ -345,6 +368,21 @@ def _serialize_tools(tools: Sequence[Tool]) -> tuple[dict[str, object], ...]:
             },
         }
         for tool in tools
+    )
+
+
+def _supports_explicit_prompt_cache(*, base_url: _ValidatedBaseUrl, model: str) -> bool:
+    normalized_model = model.lower()
+    normalized_host = base_url.host.lower()
+    normalized_path = base_url.path.lower()
+    if "claude" not in normalized_model and "anthropic" not in normalized_model:
+        return False
+    return (
+        normalized_host == "api.anthropic.com"
+        or normalized_host.endswith(".anthropic.com")
+        or normalized_host == "openrouter.ai"
+        or normalized_host.endswith(".openrouter.ai")
+        or "openrouter" in normalized_path
     )
 
 

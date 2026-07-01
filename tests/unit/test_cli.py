@@ -27,6 +27,7 @@ def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "default_model": "mock-model",
         "model_base_url": None,
         "model_api_key": None,
+        "prompt_cache": "auto",
         "environment": "development",
         "session_store_dir": tmp_path / ".project_agent" / "sessions",
         "max_steps": 8,
@@ -104,6 +105,7 @@ def test_doctor_command_uses_cli_overrides(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert f"workspace_root={tmp_path.resolve()}" in result.stdout
     assert "model_api_key_configured=False" in result.stdout
+    assert "prompt_cache=auto" in result.stdout
     assert "memory_enabled=True" in result.stdout
     assert (
         f"memory_dir={(tmp_path / '.project_agent' / 'memory').resolve()}"

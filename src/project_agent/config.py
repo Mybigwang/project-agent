@@ -10,6 +10,7 @@ from project_agent.errors import ConfigurationError
 from project_agent.runtime.permissions import PermissionMode
 
 VALID_LOG_LEVELS = frozenset({"critical", "error", "warning", "info", "debug"})
+VALID_PROMPT_CACHE_MODES = frozenset({"auto", "on", "off"})
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class Settings:
     default_model: str
     model_base_url: str | None
     model_api_key: str | None
+    prompt_cache: str
     environment: str
     session_store_dir: Path
     max_steps: int
@@ -100,6 +102,10 @@ def load_settings(
         "model_api_key",
         os.getenv("PROJECT_AGENT_API_KEY", config_values.get("model_api_key", "")),
     )
+    prompt_cache = override_values.get(
+        "prompt_cache",
+        os.getenv("PROJECT_AGENT_PROMPT_CACHE", config_values.get("prompt_cache", "auto")),
+    ).strip().lower()
     environment = override_values.get(
         "environment",
         os.getenv("PROJECT_AGENT_ENVIRONMENT", config_values.get("environment", "development")),
@@ -515,6 +521,7 @@ def load_settings(
     )
 
     _validate_log_level(log_level)
+    _validate_prompt_cache(prompt_cache)
     _validate_max_steps(max_steps)
     _validate_positive_number(command_timeout_seconds, "command_timeout_seconds")
     _validate_positive_int(max_command_output_chars, "max_command_output_chars")
@@ -558,6 +565,7 @@ def load_settings(
         default_model=default_model,
         model_base_url=model_base_url or None,
         model_api_key=model_api_key or None,
+        prompt_cache=prompt_cache,
         environment=environment,
         session_store_dir=session_store_dir,
         max_steps=max_steps,
@@ -664,6 +672,11 @@ def _parse_permission_mode(value: str) -> PermissionMode:
 def _validate_log_level(log_level: str) -> None:
     if log_level not in VALID_LOG_LEVELS:
         raise ConfigurationError(f"invalid log level: {log_level}")
+
+
+def _validate_prompt_cache(prompt_cache: str) -> None:
+    if prompt_cache not in VALID_PROMPT_CACHE_MODES:
+        raise ConfigurationError(f"invalid prompt_cache: {prompt_cache}")
 
 
 def _validate_max_steps(max_steps: int) -> None:

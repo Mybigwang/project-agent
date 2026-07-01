@@ -107,6 +107,7 @@ def doctor(ctx: typer.Context) -> None:
     typer.echo(f"default_model={settings.default_model}")
     typer.echo(f"model_base_url={settings.model_base_url or ''}")
     typer.echo(f"model_api_key_configured={settings.model_api_key is not None}")
+    typer.echo(f"prompt_cache={settings.prompt_cache}")
     typer.echo(f"environment={settings.environment}")
     typer.echo(f"memory_enabled={settings.memory_enabled}")
     typer.echo(f"memory_dir={settings.memory_dir}")
@@ -501,6 +502,7 @@ def _build_model_client(settings: Settings) -> ModelClient:
         base_url=settings.model_base_url,
         api_key=settings.model_api_key,
         model=settings.default_model,
+        prompt_cache=settings.prompt_cache,
     )
 
 

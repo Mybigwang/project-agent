@@ -217,6 +217,69 @@ def test_openai_compatible_model_client_posts_chat_completions(
     }
 
 
+def test_openai_compatible_model_client_enables_prompt_cache_for_openrouter_claude(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_public_host(monkeypatch)
+    _patch_connection(monkeypatch)
+    client = OpenAICompatibleModelClient(
+        base_url="https://openrouter.ai/api/v1",
+        api_key="test-key",
+        model="anthropic/claude-sonnet-4",
+    )
+
+    client.complete(messages=(Message(role="user", content="hello"),), tools=())
+
+    assert _FakeConnection.captured["body"]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_openai_compatible_model_client_can_disable_prompt_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_public_host(monkeypatch)
+    _patch_connection(monkeypatch)
+    client = OpenAICompatibleModelClient(
+        base_url="https://openrouter.ai/api/v1",
+        api_key="test-key",
+        model="anthropic/claude-sonnet-4",
+        prompt_cache="off",
+    )
+
+    client.complete(messages=(Message(role="user", content="hello"),), tools=())
+
+    assert "cache_control" not in _FakeConnection.captured["body"]
+
+
+def test_openai_compatible_model_client_streaming_uses_prompt_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeConnection.raw_body = _stream_body_from_events(
+        (
+            _stream_event({"choices": [{"delta": {"content": "hello"}}]}),
+            "data: [DONE]\n\n",
+        )
+    )
+    _allow_public_host(monkeypatch)
+    _patch_connection(monkeypatch)
+    client = OpenAICompatibleModelClient(
+        base_url="https://openrouter.ai/api/v1",
+        api_key="test-key",
+        model="anthropic/claude-sonnet-4",
+    )
+
+    chunks: list[str] = []
+    response = client.complete(
+        messages=(Message(role="user", content="hello"),),
+        tools=(),
+        stream_callback=chunks.append,
+    )
+
+    assert response == Message(role="assistant", content="hello")
+    assert chunks == ["hello"]
+    assert _FakeConnection.captured["body"]["stream"] is True
+    assert _FakeConnection.captured["body"]["cache_control"] == {"type": "ephemeral"}
+
+
 def test_openai_compatible_model_client_streams_content_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

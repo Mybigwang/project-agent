@@ -13,6 +13,7 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PROJECT_AGENT_DEFAULT_MODEL", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_MODEL_BASE_URL", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_API_KEY", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_PROMPT_CACHE", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_ENVIRONMENT", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_MAX_STEPS", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_STREAM_OUTPUT", raising=False)
@@ -60,6 +61,7 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.default_model == "mock-model"
     assert settings.model_base_url is None
     assert settings.model_api_key is None
+    assert settings.prompt_cache == "auto"
     assert settings.environment == "development"
     assert settings.max_steps == 24
     assert settings.stream_output is False
@@ -124,6 +126,7 @@ def test_load_settings_honors_override_precedence(
             "default_model = 'config-model'\n"
             "model_base_url = 'https://config.example/v1'\n"
             "model_api_key = 'config-key'\n"
+            "prompt_cache = 'off'\n"
             "environment = 'test'\n"
         ),
         encoding="utf-8",
@@ -133,6 +136,7 @@ def test_load_settings_honors_override_precedence(
     monkeypatch.setenv("PROJECT_AGENT_DEFAULT_MODEL", "env-model")
     monkeypatch.setenv("PROJECT_AGENT_MODEL_BASE_URL", "https://env.example/v1")
     monkeypatch.setenv("PROJECT_AGENT_API_KEY", "env-key")
+    monkeypatch.setenv("PROJECT_AGENT_PROMPT_CACHE", "on")
 
     settings = load_settings(
         config_path=config_path,
@@ -140,6 +144,7 @@ def test_load_settings_honors_override_precedence(
             "default_model": "cli-model",
             "model_base_url": "https://cli.example/v1",
             "model_api_key": "cli-key",
+            "prompt_cache": "off",
             "environment": "cli",
         },
     )
@@ -149,7 +154,35 @@ def test_load_settings_honors_override_precedence(
     assert settings.default_model == "cli-model"
     assert settings.model_base_url == "https://cli.example/v1"
     assert settings.model_api_key == "cli-key"
+    assert settings.prompt_cache == "off"
     assert settings.environment == "cli"
+
+
+@pytest.mark.parametrize("value", ["auto", "on", "off"])
+def test_load_settings_accepts_prompt_cache_modes(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"[project_agent]\nprompt_cache = '{value}'\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(config_path=config_path)
+
+    assert settings.prompt_cache == value
+
+
+def test_load_settings_rejects_invalid_prompt_cache_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[project_agent]\nprompt_cache = 'maybe'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="invalid prompt_cache"):
+        load_settings(config_path=config_path)
 
 
 def test_load_settings_honors_phase2_override_precedence(
