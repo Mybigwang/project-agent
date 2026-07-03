@@ -50,6 +50,7 @@ from project_agent.runtime.permissions.policy import load_permission_rules
 from project_agent.runtime.permissions.types import PermissionRule
 from project_agent.runtime.planner import LLMPlanner
 from project_agent.runtime.session_store import FileSessionStore
+from project_agent.runtime.tool_error_repair import SubagentToolErrorRepairer
 from project_agent.runtime.tools import EchoTool, build_default_tools
 from project_agent.skills import (
     SkillPromptPreprocessor,
@@ -117,6 +118,12 @@ def doctor(ctx: typer.Context) -> None:
     typer.echo(f"max_subagent_steps={settings.max_subagent_steps}")
     typer.echo(f"max_worker_result_chars={settings.max_worker_result_chars}")
     typer.echo(f"multi_agent_strict_task_specs={settings.multi_agent_strict_task_specs}")
+    typer.echo(f"tool_error_repair_enabled={settings.tool_error_repair_enabled}")
+    typer.echo(f"tool_error_repair_max_steps={settings.tool_error_repair_max_steps}")
+    typer.echo(
+        "tool_error_repair_max_worker_result_chars="
+        f"{settings.tool_error_repair_max_worker_result_chars}"
+    )
     typer.echo("multi_agent_roles=explore,plan,worker,verification,generalPurpose")
     typer.echo("recursive_subagents_supported=False")
 
@@ -351,6 +358,26 @@ def _run_once(
             build_skill_invocation(command_name=cmd, raw_args=actual_input)
         )
 
+    tool_error_repairer = None
+    if settings.tool_error_repair_enabled:
+        tool_error_repairer = SubagentToolErrorRepairer(
+            orchestrator=orchestrator,
+            parent_session_id=session_id,
+            model_client=model_client,
+            tools=tools,
+            session_store=session_store,
+            max_steps=settings.tool_error_repair_max_steps,
+            max_worker_result_chars=settings.tool_error_repair_max_worker_result_chars,
+            repository_context_builder=repository_context_builder,
+            enable_repository_context=False,
+            memory_context_builder=None,
+            context_manager=context_manager,
+            notification_callback=notification_callback,
+            skill_registry=skill_registry,
+            skill_preprocessor=skill_preprocessor,
+            permission_policy=permission_policy,
+        )
+
     active_tools = tools
     if multi_agent_enabled or use_coordinator:
         active_tools = [
@@ -421,6 +448,7 @@ def _run_once(
             permission_policy=permission_policy,
             approval_callback=approval_callback if interactive_approval else None,
             context_manager=context_manager,
+            tool_error_repairer=tool_error_repairer,
         )
     if stream_output:
         if not streamed_output and result.final_message.content:

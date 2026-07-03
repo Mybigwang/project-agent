@@ -32,6 +32,10 @@ class ToolRegistry:
                 content=f"tool not found: {tool_call.name}",
                 is_error=True,
                 error_code="tool_not_found",
+                data={
+                    "requested_tool": tool_call.name,
+                    "available_tools": tuple(tool.name for tool in self._tools),
+                },
             )
 
         attempts = 2 if tool.is_read_only else 1
@@ -43,17 +47,29 @@ class ToolRegistry:
                 if is_last_attempt:
                     return ToolResult(
                         name=tool.name,
-                        content=f"tool execution failed: {error}",
+                        content="tool execution failed; inspect data.message",
                         is_error=True,
                         error_code="tool_execution_failed",
                         retryable=tool.is_read_only,
+                        data={
+                            "tool_name": tool.name,
+                            "arguments": tool_call.arguments,
+                            "exception_type": type(error).__name__,
+                            "message": str(error),
+                        },
                     )
             except Exception as error:
                 return ToolResult(
                     name=tool.name,
-                    content=f"tool execution failed: {error}",
+                    content="tool execution failed; inspect data.message",
                     is_error=True,
                     error_code="tool_execution_failed",
+                    data={
+                        "tool_name": tool.name,
+                        "arguments": tool_call.arguments,
+                        "exception_type": type(error).__name__,
+                        "message": str(error),
+                    },
                 )
 
         return ToolResult(

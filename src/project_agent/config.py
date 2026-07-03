@@ -70,6 +70,9 @@ class Settings:
     max_subagent_steps: int
     max_worker_result_chars: int
     multi_agent_strict_task_specs: bool
+    tool_error_repair_enabled: bool
+    tool_error_repair_max_steps: int
+    tool_error_repair_max_worker_result_chars: int
 
 
 def load_settings(
@@ -519,6 +522,33 @@ def load_settings(
             ),
         )
     )
+    tool_error_repair_enabled = _parse_bool(
+        override_values.get(
+            "tool_error_repair_enabled",
+            os.getenv(
+                "PROJECT_AGENT_TOOL_ERROR_REPAIR_ENABLED",
+                config_values.get("tool_error_repair_enabled", "false"),
+            ),
+        )
+    )
+    tool_error_repair_max_steps = int(
+        override_values.get(
+            "tool_error_repair_max_steps",
+            os.getenv(
+                "PROJECT_AGENT_TOOL_ERROR_REPAIR_MAX_STEPS",
+                config_values.get("tool_error_repair_max_steps", "3"),
+            ),
+        )
+    )
+    tool_error_repair_max_worker_result_chars = int(
+        override_values.get(
+            "tool_error_repair_max_worker_result_chars",
+            os.getenv(
+                "PROJECT_AGENT_TOOL_ERROR_REPAIR_MAX_WORKER_RESULT_CHARS",
+                config_values.get("tool_error_repair_max_worker_result_chars", "4000"),
+            ),
+        )
+    )
 
     _validate_log_level(log_level)
     _validate_prompt_cache(prompt_cache)
@@ -555,6 +585,11 @@ def load_settings(
         raise ConfigurationError("max_subagents_per_turn must be <= 16")
     _validate_positive_int(max_subagent_steps, "max_subagent_steps")
     _validate_positive_int(max_worker_result_chars, "max_worker_result_chars")
+    _validate_positive_int(tool_error_repair_max_steps, "tool_error_repair_max_steps")
+    _validate_positive_int(
+        tool_error_repair_max_worker_result_chars,
+        "tool_error_repair_max_worker_result_chars",
+    )
     _validate_path_within_workspace(memory_dir, workspace_root, "memory_dir")
     _validate_non_empty_string(context_profile, "context_profile")
     _validate_non_empty_string(context_profile_version, "context_profile_version")
@@ -615,6 +650,9 @@ def load_settings(
         max_subagent_steps=max_subagent_steps,
         max_worker_result_chars=max_worker_result_chars,
         multi_agent_strict_task_specs=multi_agent_strict_task_specs,
+        tool_error_repair_enabled=tool_error_repair_enabled,
+        tool_error_repair_max_steps=tool_error_repair_max_steps,
+        tool_error_repair_max_worker_result_chars=tool_error_repair_max_worker_result_chars,
     )
 
 

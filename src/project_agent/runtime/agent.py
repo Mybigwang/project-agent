@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -13,6 +14,7 @@ from project_agent.core.interfaces import (
     RepositoryContextBuilderProtocol,
     SessionStore,
     Tool,
+    ToolErrorRepairerProtocol,
 )
 from project_agent.core.types import (
     AgentTraceStep,
@@ -44,6 +46,16 @@ from project_agent.skills.errors import SkillError
 
 LOGGER = logging.getLogger(__name__)
 MAX_SKILL_CALLS_PER_TURN = 1
+MAX_TOOL_ERROR_RECOVERY_ROUNDS = 2
+TOOL_ERROR_REPAIR_CONTEXT_MESSAGES = 2
+REPAIRABLE_TOOL_ERROR_CODES = frozenset(
+    {
+        "command_failed",
+        "command_timeout",
+        "command_execution_failed",
+        "tool_execution_failed",
+    }
+)
 NotificationCallback = Callable[[str], None]
 ApprovalCallback = Callable[[str], bool]
 
@@ -70,6 +82,7 @@ class AgentRuntime:
         skill_preprocessor: SkillPromptPreprocessor | None = None,
         permission_policy: PermissionPolicy | None = None,
         approval_callback: ApprovalCallback | None = None,
+        tool_error_repairer: ToolErrorRepairerProtocol | None = None,
         system_prefix_messages: Sequence[Message] = (),
     ) -> RunResult:
         state = session_store.load(session_id)
@@ -106,6 +119,7 @@ class AgentRuntime:
                 skill_preprocessor=skill_preprocessor,
                 permission_policy=permission_policy,
                 approval_callback=approval_callback,
+                tool_error_repairer=tool_error_repairer,
                 system_prefix_messages=tuple(system_prefix_messages),
             )
 
@@ -157,6 +171,7 @@ class AgentRuntime:
                 skill_preprocessor=skill_preprocessor,
                 permission_policy=permission_policy,
                 approval_callback=approval_callback,
+                tool_error_repairer=tool_error_repairer,
                 existing_context_state=context_state,
                 system_prefix_messages=tuple(system_prefix_messages),
             )
@@ -287,6 +302,7 @@ class AgentRuntime:
         skill_preprocessor: SkillPromptPreprocessor | None,
         permission_policy: PermissionPolicy | None,
         approval_callback: ApprovalCallback | None,
+        tool_error_repairer: ToolErrorRepairerProtocol | None,
         system_prefix_messages: tuple[Message, ...],
     ) -> RunResult:
         context_state = session_store.load(session_id).context_state
@@ -306,6 +322,8 @@ class AgentRuntime:
         )
         trace: tuple[AgentTraceStep, ...] = ()
         skill_calls_used = 0
+        consecutive_tool_error_rounds = 0
+        last_tool_error_signature: tuple[str, str, str | None] | None = None
 
         for step in range(1, max_steps + 1):
             response = model_client.complete(
@@ -375,6 +393,15 @@ class AgentRuntime:
                 permission_policy=permission_policy,
                 approval_callback=approval_callback,
             )
+            executed_tool_calls, tool_results, tool_messages = self._maybe_repair_tool_error(
+                executed_tool_calls=executed_tool_calls,
+                tool_results=tool_results,
+                tool_messages=tool_messages,
+                tool_error_repairer=tool_error_repairer,
+                user_input=user_input,
+                messages=messages,
+                workspace_root=workspace_root,
+            )
             assistant_tool_message = Message(
                 role="assistant", content="", tool_calls=executed_tool_calls
             )
@@ -416,24 +443,38 @@ class AgentRuntime:
                 for tool_result in tool_results
             )
             if tool_results and tool_results[-1].is_error:
-                final_message = Message(
-                    role="assistant", content=tool_results[-1].content
+                signature = self._tool_error_signature(
+                    tool_call=executed_tool_calls[-1] if executed_tool_calls else None,
+                    tool_result=tool_results[-1],
                 )
-                final_messages = messages + (final_message,)
-                session_store.save(
-                    session_id,
-                    replace(
-                        session_store.load(session_id),
+                consecutive_tool_error_rounds += 1
+                if (
+                    signature == last_tool_error_signature
+                    or consecutive_tool_error_rounds > MAX_TOOL_ERROR_RECOVERY_ROUNDS
+                ):
+                    final_message = Message(
+                        role="assistant",
+                        content=self._tool_error_summary(tool_results[-1]),
+                    )
+                    final_messages = messages + (final_message,)
+                    session_store.save(
+                        session_id,
+                        replace(
+                            session_store.load(session_id),
+                            messages=final_messages,
+                            context_state=context_state,
+                        ),
+                    )
+                    return RunResult(
+                        final_message=final_message,
                         messages=final_messages,
-                        context_state=context_state,
-                    ),
-                )
-                return RunResult(
-                    final_message=final_message,
-                    messages=final_messages,
-                    trace=trace,
-                    memory_context=memory_context,
-                )
+                        trace=trace,
+                        memory_context=memory_context,
+                    )
+                last_tool_error_signature = signature
+                continue
+            consecutive_tool_error_rounds = 0
+            last_tool_error_signature = None
 
         raise RuntimeLimitError(max_steps)
 
@@ -460,6 +501,7 @@ class AgentRuntime:
         skill_preprocessor: SkillPromptPreprocessor | None,
         permission_policy: PermissionPolicy | None,
         approval_callback: ApprovalCallback | None,
+        tool_error_repairer: ToolErrorRepairerProtocol | None,
         existing_context_state: ContextManagementState | None,
         system_prefix_messages: tuple[Message, ...],
     ) -> _TaskRunResult:
@@ -485,6 +527,8 @@ class AgentRuntime:
         step = start_step
         task_step = 0
         skill_calls_used = 0
+        consecutive_tool_error_rounds = 0
+        last_tool_error_signature: tuple[str, str, str | None] | None = None
 
         while task_step < max_steps:
             response = model_client.complete(
@@ -553,6 +597,15 @@ class AgentRuntime:
                 permission_policy=permission_policy,
                 approval_callback=approval_callback,
             )
+            executed_tool_calls, tool_results, tool_messages = self._maybe_repair_tool_error(
+                executed_tool_calls=executed_tool_calls,
+                tool_results=tool_results,
+                tool_messages=tool_messages,
+                tool_error_repairer=tool_error_repairer,
+                user_input=user_input,
+                messages=messages,
+                workspace_root=workspace_root,
+            )
             assistant_tool_message = Message(
                 role="assistant", content="", tool_calls=executed_tool_calls
             )
@@ -598,14 +651,27 @@ class AgentRuntime:
             step += 1
             task_step += 1
             if tool_results and tool_results[-1].is_error:
-                return _TaskRunResult(
-                    messages=messages,
-                    trace=trace,
-                    next_step=step,
-                    final_message=None,
-                    error=tool_results[-1].content,
-                    context_state=context_state,
+                signature = self._tool_error_signature(
+                    tool_call=executed_tool_calls[-1] if executed_tool_calls else None,
+                    tool_result=tool_results[-1],
                 )
+                consecutive_tool_error_rounds += 1
+                if (
+                    signature == last_tool_error_signature
+                    or consecutive_tool_error_rounds > MAX_TOOL_ERROR_RECOVERY_ROUNDS
+                ):
+                    return _TaskRunResult(
+                        messages=messages,
+                        trace=trace,
+                        next_step=step,
+                        final_message=None,
+                        error=self._tool_error_summary(tool_results[-1]),
+                        context_state=context_state,
+                    )
+                last_tool_error_signature = signature
+                continue
+            consecutive_tool_error_rounds = 0
+            last_tool_error_signature = None
 
         raise RuntimeLimitError(max_steps)
 
@@ -757,6 +823,88 @@ class AgentRuntime:
         )
         return updated_messages, updated_model_messages, updated_trace
 
+    def _maybe_repair_tool_error(
+        self,
+        *,
+        executed_tool_calls: tuple[ToolCall, ...],
+        tool_results: tuple[ToolResult, ...],
+        tool_messages: tuple[Message, ...],
+        tool_error_repairer: ToolErrorRepairerProtocol | None,
+        user_input: str,
+        messages: tuple[Message, ...],
+        workspace_root: Path,
+    ) -> tuple[tuple[ToolCall, ...], tuple[ToolResult, ...], tuple[Message, ...]]:
+        if tool_error_repairer is None or not tool_results or not tool_results[-1].is_error:
+            return executed_tool_calls, tool_results, tool_messages
+        failed_result = tool_results[-1]
+        if failed_result.error_code not in REPAIRABLE_TOOL_ERROR_CODES:
+            return executed_tool_calls, tool_results, tool_messages
+        if not executed_tool_calls or not tool_messages:
+            return executed_tool_calls, tool_results, tool_messages
+
+        failed_call = executed_tool_calls[-1]
+        recent_messages = messages[-TOOL_ERROR_REPAIR_CONTEXT_MESSAGES:]
+        try:
+            repaired_result = tool_error_repairer.attempt_repair(
+                user_input=user_input,
+                recent_messages=recent_messages,
+                tool_call=failed_call,
+                tool_result=failed_result,
+                workspace_root=workspace_root,
+            )
+        except Exception as error:
+            repair_data = dict(failed_result.data or {})
+            repair_data["repair_error"] = {
+                "exception_type": type(error).__name__,
+                "message": str(error),
+            }
+            failed_result = ToolResult(
+                name=failed_result.name,
+                content=failed_result.content,
+                is_error=True,
+                data=repair_data,
+                error_code=failed_result.error_code,
+                retryable=failed_result.retryable,
+            )
+            return (
+                executed_tool_calls,
+                (*tool_results[:-1], failed_result),
+                (
+                    *tool_messages[:-1],
+                    Message(
+                        role="tool",
+                        content=self._format_tool_message(failed_result),
+                        tool_call_id=tool_messages[-1].tool_call_id,
+                    ),
+                ),
+            )
+
+        if repaired_result is None or repaired_result.is_error:
+            return executed_tool_calls, tool_results, tool_messages
+
+        repaired_data = dict(repaired_result.data or {})
+        repaired_data["original_error"] = json.loads(failed_result.to_message_content())
+        repaired_result = ToolResult(
+            name=repaired_result.name,
+            content=repaired_result.content,
+            is_error=False,
+            data=repaired_data,
+            error_code=None,
+            retryable=repaired_result.retryable,
+        )
+        return (
+            executed_tool_calls,
+            (*tool_results[:-1], repaired_result),
+            (
+                *tool_messages[:-1],
+                Message(
+                    role="tool",
+                    content=self._format_tool_message(repaired_result),
+                    tool_call_id=tool_messages[-1].tool_call_id,
+                ),
+            ),
+        )
+
     def _run_tool_calls(
         self,
         *,
@@ -862,6 +1010,26 @@ class AgentRuntime:
             raise AgentError("model response tool call missing id")
         if len(call_ids) != len(set(call_ids)):
             raise AgentError("model response tool call ids must be unique")
+
+    def _tool_error_signature(
+        self, *, tool_call: ToolCall | None, tool_result: ToolResult
+    ) -> tuple[str, str, str | None]:
+        arguments = tool_call.arguments if tool_call is not None else {}
+        try:
+            serialized_arguments = json.dumps(
+                arguments, ensure_ascii=False, sort_keys=True
+            )
+        except TypeError:
+            serialized_arguments = repr(arguments)
+        return (tool_result.name, serialized_arguments, tool_result.error_code)
+
+    def _tool_error_summary(self, tool_result: ToolResult) -> str:
+        if tool_result.error_code is None:
+            return f"Tool failed repeatedly: {tool_result.content}"
+        return (
+            f"Tool failed repeatedly ({tool_result.error_code}): "
+            f"{tool_result.content}"
+        )
 
     def _task_context_message(self, *, task: Task, task_plan: TaskPlan) -> Message:
         completed = ", ".join(

@@ -36,6 +36,7 @@ class RunCommandTool:
                 content="invalid argv",
                 is_error=True,
                 error_code="invalid_arguments",
+                data={"argv": argv},
             )
 
         try:
@@ -53,30 +54,52 @@ class RunCommandTool:
         except subprocess.TimeoutExpired:
             return ToolResult(
                 name=self.name,
-                content="command timed out",
+                content=(
+                    "command timed out; inspect data.argv and data.timeout_seconds"
+                ),
                 is_error=True,
                 error_code="command_timeout",
+                data={
+                    "argv": argv,
+                    "timeout_seconds": self._timeout_seconds,
+                },
             )
         except OSError as error:
             return ToolResult(
                 name=self.name,
-                content=f"failed to run command: {error}",
+                content="failed to run command; inspect data.message",
                 is_error=True,
                 error_code="command_execution_failed",
+                data={
+                    "argv": argv,
+                    "exception_type": type(error).__name__,
+                    "message": str(error),
+                },
             )
 
+        stdout_truncated = len(completed.stdout) > self._max_output_chars
+        stderr_truncated = len(completed.stderr) > self._max_output_chars
         stdout = completed.stdout[: self._max_output_chars].rstrip("\n")
         stderr = completed.stderr[: self._max_output_chars].rstrip("\n")
         is_error = completed.returncode != 0
+        content = (
+            f"command failed with exit code {completed.returncode}; "
+            "inspect data.stdout/data.stderr"
+            if is_error
+            else f"command exited with code {completed.returncode}"
+        )
         return ToolResult(
             name=self.name,
-            content=f"command exited with code {completed.returncode}",
+            content=content,
             is_error=is_error,
             data={
                 "argv": argv,
                 "exit_code": completed.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
+                "stdout_truncated": stdout_truncated,
+                "stderr_truncated": stderr_truncated,
+                "timeout_seconds": self._timeout_seconds,
             },
             error_code="command_failed" if is_error else None,
         )
