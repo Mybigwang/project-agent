@@ -77,6 +77,9 @@ def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "max_subagent_steps": 12,
         "max_worker_result_chars": 8000,
         "multi_agent_strict_task_specs": True,
+        "tool_error_repair_enabled": False,
+        "tool_error_repair_max_steps": 3,
+        "tool_error_repair_max_worker_result_chars": 4000,
         **overrides,
     }
     return Settings(**values)
