@@ -77,6 +77,10 @@ def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "max_subagent_steps": 12,
         "max_worker_result_chars": 8000,
         "multi_agent_strict_task_specs": True,
+        "mcp_enabled": False,
+        "mcp_config_file": tmp_path / ".project_agent" / "mcp-servers.json",
+        "mcp_request_timeout_seconds": 30.0,
+        "mcp_max_description_chars": 2048,
         **overrides,
     }
     return Settings(**values)
@@ -116,6 +120,51 @@ def test_doctor_command_uses_cli_overrides(tmp_path: Path) -> None:
     assert "max_subagents_per_turn=4" in result.stdout
     assert "multi_agent_roles=explore,plan,worker,verification,generalPurpose" in result.stdout
     assert "recursive_subagents_supported=False" in result.stdout
+    assert "mcp_enabled=False" in result.stdout
+
+
+def test_mcp_github_install_writes_example_config(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["--workspace-root", str(tmp_path), "mcp", "install-github"],
+    )
+
+    config_path = tmp_path / ".project_agent" / "mcp-servers.json"
+    payload = tomllib.loads(
+        "[root]\nvalue = '''" + config_path.read_text(encoding="utf-8") + "'''\n"
+    )["root"]["value"]
+
+    assert result.exit_code == 0
+    assert "github MCP server configured" in result.stdout
+    assert '"GITHUB_TOKEN": "${GITHUB_TOKEN}"' in payload
+    assert '"@modelcontextprotocol/server-github"' in payload
+
+
+def test_run_command_appends_mcp_tools_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    settings = _make_settings(tmp_path, mcp_enabled=True)
+    monkeypatch.setattr(cli_module, "load_settings", lambda **_: settings)
+    monkeypatch.setattr(
+        cli_module,
+        "build_mcp_tools",
+        lambda **_: [cli_module.EchoTool()],
+    )
+
+    def fake_run_once(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_module, "_run_once", fake_run_once)
+
+    result = runner.invoke(
+        app,
+        ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"],
+    )
+
+    assert result.exit_code == 0
+    assert [tool.name for tool in captured["tools"]].count("echo") == 2
 
 
 def test_run_command_executes_runtime(tmp_path: Path) -> None:

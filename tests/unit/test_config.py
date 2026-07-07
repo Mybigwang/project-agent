@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 
 from project_agent.config import load_settings
-from project_agent.runtime.permissions import PermissionMode
 from project_agent.errors import ConfigurationError
+from project_agent.runtime.permissions import PermissionMode
 
 
 def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,7 +78,9 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.context_command_timeout_seconds == 5.0
     assert settings.skills_enabled is True
     assert settings.skills_builtin_enabled is True
-    assert settings.project_skills_dir == (settings.workspace_root / ".project_agent" / "skills").resolve()
+    assert settings.project_skills_dir == (
+        settings.workspace_root / ".project_agent" / "skills"
+    ).resolve()
     assert settings.user_skills_dir is None
     assert settings.skills_allow_command_substitution is False
     assert settings.skills_max_composition_depth == 3
@@ -110,6 +112,12 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.max_subagent_steps == 12
     assert settings.max_worker_result_chars == 8000
     assert settings.multi_agent_strict_task_specs is True
+    assert settings.mcp_enabled is False
+    assert settings.mcp_config_file == (
+        settings.workspace_root / ".project_agent" / "mcp-servers.json"
+    ).resolve()
+    assert settings.mcp_request_timeout_seconds == 30.0
+    assert settings.mcp_max_description_chars == 2048
 
 
 def test_load_settings_honors_override_precedence(
@@ -255,6 +263,46 @@ def test_load_settings_honors_multi_agent_overrides(
     assert settings.max_subagent_steps == 5
     assert settings.max_worker_result_chars == 1000
     assert settings.multi_agent_strict_task_specs is False
+
+
+def test_load_settings_honors_mcp_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    workspace_root = tmp_path / "workspace"
+    config_path.write_text(
+        (
+            "[project_agent]\n"
+            "mcp_enabled = false\n"
+            "mcp_config_file = '.project_agent/config-mcp.json'\n"
+            "mcp_request_timeout_seconds = 10\n"
+            "mcp_max_description_chars = 1000\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROJECT_AGENT_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("PROJECT_AGENT_MCP_ENABLED", "true")
+    monkeypatch.setenv("PROJECT_AGENT_MCP_CONFIG_FILE", ".project_agent/env-mcp.json")
+    monkeypatch.setenv("PROJECT_AGENT_MCP_REQUEST_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("PROJECT_AGENT_MCP_MAX_DESCRIPTION_CHARS", "1500")
+
+    settings = load_settings(
+        config_path=config_path,
+        overrides={
+            "mcp_enabled": "false",
+            "mcp_config_file": ".project_agent/cli-mcp.json",
+            "mcp_request_timeout_seconds": "25",
+            "mcp_max_description_chars": "1800",
+        },
+    )
+
+    assert settings.mcp_enabled is False
+    assert settings.mcp_config_file == (
+        workspace_root / ".project_agent" / "cli-mcp.json"
+    ).resolve()
+    assert settings.mcp_request_timeout_seconds == 25.0
+    assert settings.mcp_max_description_chars == 1800
 
 
 def test_load_settings_raises_on_malformed_config(tmp_path: Path) -> None:
@@ -441,7 +489,10 @@ def test_load_settings_supports_skill_specific_overrides(
     assert settings.skills_max_expansion_chars == 1111
 
 
-def test_load_settings_supports_permission_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_settings_supports_permission_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[project_agent]\npermission_mode = 'accept_edits'\npermission_rules_file = 'rules.toml'\n",
@@ -613,7 +664,10 @@ def test_load_settings_rejects_context_recover_ratio_not_below_trigger(tmp_path:
 
 
 @pytest.mark.parametrize("field_name", ["context_profile", "context_profile_version"])
-def test_load_settings_rejects_blank_context_identity_fields(tmp_path: Path, field_name: str) -> None:
+def test_load_settings_rejects_blank_context_identity_fields(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         f"[project_agent]\n{field_name} = '   '\n",

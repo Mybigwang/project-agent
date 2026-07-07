@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from uuid import uuid4
@@ -34,6 +35,7 @@ from project_agent.runtime.context_management import (
     HeuristicTokenEstimator,
     MicroCompactor,
 )
+from project_agent.runtime.mcp import build_github_mcp_config, build_mcp_tools
 from project_agent.runtime.memory import (
     FileMemoryStore,
     MemoryContextBuilder,
@@ -73,6 +75,8 @@ ENVIRONMENT_OPTION = typer.Option(None, "--environment")
 CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x1b]")
 
 app = typer.Typer(help="Project Agent CLI.")
+mcp_app = typer.Typer(help="Manage MCP servers.")
+app.add_typer(mcp_app, name="mcp")
 
 
 @app.callback()
@@ -117,6 +121,8 @@ def doctor(ctx: typer.Context) -> None:
     typer.echo(f"max_subagent_steps={settings.max_subagent_steps}")
     typer.echo(f"max_worker_result_chars={settings.max_worker_result_chars}")
     typer.echo(f"multi_agent_strict_task_specs={settings.multi_agent_strict_task_specs}")
+    typer.echo(f"mcp_enabled={settings.mcp_enabled}")
+    typer.echo(f"mcp_config_file={settings.mcp_config_file}")
     typer.echo("multi_agent_roles=explore,plan,worker,verification,generalPurpose")
     typer.echo("recursive_subagents_supported=False")
 
@@ -124,6 +130,20 @@ def doctor(ctx: typer.Context) -> None:
 @app.command()
 def version() -> None:
     typer.echo(__version__)
+
+
+@mcp_app.command("install-github")
+def mcp_install_github(ctx: typer.Context, force: bool = typer.Option(False, "--force")) -> None:
+    settings = _require_settings(ctx.obj)
+    config_path = settings.mcp_config_file
+    if config_path.exists() and not force:
+        raise AgentError(f"MCP config already exists: {config_path}")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(build_github_mcp_config(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    typer.echo(f"github MCP server configured at {config_path}")
 
 
 @app.command()
@@ -143,7 +163,7 @@ def run(
     runtime = AgentRuntime()
     model_client = _build_model_client(settings)
     session_store = FileSessionStore(settings.session_store_dir)
-    tools = [
+    tools: list[Tool] = [
         EchoTool(),
         *build_default_tools(
             max_file_read_chars=settings.max_file_read_chars,
@@ -151,6 +171,14 @@ def run(
             max_command_output_chars=settings.max_command_output_chars,
         ),
     ]
+    if settings.mcp_enabled:
+        tools.extend(
+            build_mcp_tools(
+                config_path=settings.mcp_config_file,
+                request_timeout_seconds=settings.mcp_request_timeout_seconds,
+                max_description_chars=settings.mcp_max_description_chars,
+            )
+        )
     repository_context_builder = RepositoryContextBuilder(
         max_repository_context_chars=settings.max_repository_context_chars,
         max_git_diff_chars=settings.max_git_diff_chars,

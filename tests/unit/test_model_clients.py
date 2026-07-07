@@ -503,7 +503,7 @@ def test_openai_compatible_model_client_serializes_tool_call_message_content(
     assert serialized_message["content"] == "calling echo"
 
 
-def test_openai_compatible_model_client_rejects_tool_call_with_content(
+def test_openai_compatible_model_client_parses_tool_call_with_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _FakeConnection.payload = {
@@ -528,10 +528,13 @@ def test_openai_compatible_model_client_rejects_tool_call_with_content(
     }
     client = _make_client(monkeypatch)
 
-    with pytest.raises(AgentError, match="must not include content with tool_calls"):
-        client.complete(
-            messages=(Message(role="user", content="use a tool"),), tools=(_ToolStub(),)
-        )
+    response = client.complete(
+        messages=(Message(role="user", content="use a tool"),), tools=(_ToolStub(),)
+    )
+
+    assert response == (
+        ToolCall(name="echo", arguments={"content": "ping"}, call_id="call_123"),
+    )
 
 
 def test_openai_compatible_model_client_parses_tool_call(

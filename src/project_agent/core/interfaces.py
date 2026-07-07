@@ -17,7 +17,12 @@ from project_agent.core.types import (
     ToolCall,
     ToolResult,
 )
-from project_agent.runtime.permissions.types import ToolPermissionCategory
+from project_agent.runtime.permissions.types import (
+    PermissionMode,
+    PermissionOutcome,
+    PermissionRequest,
+    ToolPermissionCategory,
+)
 
 
 class Plugin(Protocol):
@@ -34,6 +39,13 @@ class Tool(Protocol):
     permission_category: ToolPermissionCategory
 
     def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult: ...
+
+
+class PermissionPolicyProtocol(Protocol):
+    @property
+    def mode(self) -> PermissionMode: ...
+
+    def evaluate(self, request: PermissionRequest) -> PermissionOutcome: ...
 
 
 class ModelClient(Protocol):

@@ -70,6 +70,10 @@ class Settings:
     max_subagent_steps: int
     max_worker_result_chars: int
     multi_agent_strict_task_specs: bool
+    mcp_enabled: bool
+    mcp_config_file: Path
+    mcp_request_timeout_seconds: float
+    mcp_max_description_chars: int
 
 
 def load_settings(
@@ -293,13 +297,19 @@ def load_settings(
     permission_mode = _parse_permission_mode(
         override_values.get(
             "permission_mode",
-            os.getenv("PROJECT_AGENT_PERMISSION_MODE", config_values.get("permission_mode", "default")),
+            os.getenv(
+                "PROJECT_AGENT_PERMISSION_MODE",
+                config_values.get("permission_mode", "default"),
+            ),
         )
     )
     permission_rules_file = _parse_optional_path(
         override_values.get(
             "permission_rules_file",
-            os.getenv("PROJECT_AGENT_PERMISSION_RULES_FILE", config_values.get("permission_rules_file", "")),
+            os.getenv(
+                "PROJECT_AGENT_PERMISSION_RULES_FILE",
+                config_values.get("permission_rules_file", ""),
+            ),
         ),
         workspace_root=workspace_root,
     )
@@ -368,7 +378,10 @@ def load_settings(
     )
     context_profile = override_values.get(
         "context_profile",
-        os.getenv("PROJECT_AGENT_CONTEXT_PROFILE", config_values.get("context_profile", "compact-default")),
+        os.getenv(
+            "PROJECT_AGENT_CONTEXT_PROFILE",
+            config_values.get("context_profile", "compact-default"),
+        ),
     )
     context_profile_version = override_values.get(
         "context_profile_version",
@@ -519,6 +532,43 @@ def load_settings(
             ),
         )
     )
+    mcp_enabled = _parse_bool(
+        override_values.get(
+            "mcp_enabled",
+            os.getenv("PROJECT_AGENT_MCP_ENABLED", config_values.get("mcp_enabled", "false")),
+        )
+    )
+    mcp_config_file = _parse_path(
+        override_values.get(
+            "mcp_config_file",
+            os.getenv(
+                "PROJECT_AGENT_MCP_CONFIG_FILE",
+                config_values.get(
+                    "mcp_config_file",
+                    str(workspace_root / ".project_agent" / "mcp-servers.json"),
+                ),
+            ),
+        ),
+        workspace_root=workspace_root,
+    )
+    mcp_request_timeout_seconds = float(
+        override_values.get(
+            "mcp_request_timeout_seconds",
+            os.getenv(
+                "PROJECT_AGENT_MCP_REQUEST_TIMEOUT_SECONDS",
+                config_values.get("mcp_request_timeout_seconds", "30"),
+            ),
+        )
+    )
+    mcp_max_description_chars = int(
+        override_values.get(
+            "mcp_max_description_chars",
+            os.getenv(
+                "PROJECT_AGENT_MCP_MAX_DESCRIPTION_CHARS",
+                config_values.get("mcp_max_description_chars", "2048"),
+            ),
+        )
+    )
 
     _validate_log_level(log_level)
     _validate_prompt_cache(prompt_cache)
@@ -555,6 +605,9 @@ def load_settings(
         raise ConfigurationError("max_subagents_per_turn must be <= 16")
     _validate_positive_int(max_subagent_steps, "max_subagent_steps")
     _validate_positive_int(max_worker_result_chars, "max_worker_result_chars")
+    _validate_positive_number(mcp_request_timeout_seconds, "mcp_request_timeout_seconds")
+    if mcp_max_description_chars < 4:
+        raise ConfigurationError("mcp_max_description_chars must be >= 4")
     _validate_path_within_workspace(memory_dir, workspace_root, "memory_dir")
     _validate_non_empty_string(context_profile, "context_profile")
     _validate_non_empty_string(context_profile_version, "context_profile_version")
@@ -615,6 +668,10 @@ def load_settings(
         max_subagent_steps=max_subagent_steps,
         max_worker_result_chars=max_worker_result_chars,
         multi_agent_strict_task_specs=multi_agent_strict_task_specs,
+        mcp_enabled=mcp_enabled,
+        mcp_config_file=mcp_config_file,
+        mcp_request_timeout_seconds=mcp_request_timeout_seconds,
+        mcp_max_description_chars=mcp_max_description_chars,
     )
 
 

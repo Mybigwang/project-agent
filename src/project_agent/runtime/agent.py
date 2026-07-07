@@ -9,6 +9,7 @@ from project_agent.core.interfaces import (
     ContextManagerProtocol,
     MemoryContextBuilderProtocol,
     ModelClient,
+    PermissionPolicyProtocol,
     Planner,
     RepositoryContextBuilderProtocol,
     SessionStore,
@@ -20,7 +21,6 @@ from project_agent.core.types import (
     MemoryContext,
     Message,
     RunResult,
-    SessionState,
     SkillCall,
     Task,
     TaskPlan,
@@ -68,7 +68,7 @@ class AgentRuntime:
         notification_callback: NotificationCallback | None = None,
         skill_registry: SkillRegistry | None = None,
         skill_preprocessor: SkillPromptPreprocessor | None = None,
-        permission_policy: PermissionPolicy | None = None,
+        permission_policy: PermissionPolicyProtocol | None = None,
         approval_callback: ApprovalCallback | None = None,
         system_prefix_messages: Sequence[Message] = (),
     ) -> RunResult:
@@ -285,7 +285,7 @@ class AgentRuntime:
         notification_callback: NotificationCallback | None,
         skill_registry: SkillRegistry | None,
         skill_preprocessor: SkillPromptPreprocessor | None,
-        permission_policy: PermissionPolicy | None,
+        permission_policy: PermissionPolicyProtocol | None,
         approval_callback: ApprovalCallback | None,
         system_prefix_messages: tuple[Message, ...],
     ) -> RunResult:
@@ -458,7 +458,7 @@ class AgentRuntime:
         notification_callback: NotificationCallback | None,
         skill_registry: SkillRegistry | None,
         skill_preprocessor: SkillPromptPreprocessor | None,
-        permission_policy: PermissionPolicy | None,
+        permission_policy: PermissionPolicyProtocol | None,
         approval_callback: ApprovalCallback | None,
         existing_context_state: ContextManagementState | None,
         system_prefix_messages: tuple[Message, ...],
@@ -717,7 +717,7 @@ class AgentRuntime:
         skill_registry: SkillRegistry | None,
         skill_preprocessor: SkillPromptPreprocessor | None,
         notification_callback: NotificationCallback | None,
-        permission_policy: PermissionPolicy | None,
+        permission_policy: PermissionPolicyProtocol | None,
         approval_callback: ApprovalCallback | None,
         task_id: str | None = None,
     ) -> tuple[tuple[Message, ...], tuple[Message, ...], tuple[AgentTraceStep, ...]]:
@@ -763,7 +763,7 @@ class AgentRuntime:
         response: tuple[ToolCall, ...],
         registry: ToolRegistry,
         workspace_root: Path,
-        permission_policy: PermissionPolicy | None,
+        permission_policy: PermissionPolicyProtocol | None,
         approval_callback: ApprovalCallback | None,
     ) -> tuple[tuple[ToolCall, ...], tuple[ToolResult, ...], tuple[Message, ...]]:
         self._validate_tool_call_batch(response)
@@ -798,7 +798,7 @@ class AgentRuntime:
         tool_call: ToolCall,
         registry: ToolRegistry,
         workspace_root: Path,
-        permission_policy: PermissionPolicy | None,
+        permission_policy: PermissionPolicyProtocol | None,
         approval_callback: ApprovalCallback | None,
     ) -> ToolResult:
         tool = registry.get_tool(tool_call.name)

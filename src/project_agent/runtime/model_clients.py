@@ -629,9 +629,6 @@ def _parse_chat_response(
 
     tool_calls = _parse_tool_calls(message)
     if tool_calls is not None:
-        content = message.get("content")
-        if content not in (None, ""):
-            raise AgentError("model response must not include content with tool_calls")
         return tool_calls
 
     content = message.get("content")
