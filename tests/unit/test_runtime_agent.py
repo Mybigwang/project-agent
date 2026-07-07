@@ -163,6 +163,47 @@ class MultiToolCallWithErrorModelClient:
         return Message(role="assistant", content="done")
 
 
+class RepeatingBoomModelClient:
+    name = "repeating-boom-model"
+
+    def __init__(self) -> None:
+        self.calls: tuple[tuple[Message, ...], ...] = ()
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        stream_callback: object | None = None,
+    ) -> tuple[ToolCall, ...]:
+        del tools, stream_callback
+        self.calls = (*self.calls, tuple(messages))
+        return (ToolCall(name="boom", arguments={}, call_id="call_boom"),)
+
+
+class RecordingRepairer:
+    def __init__(self, result: ToolResult | None) -> None:
+        self.result = result
+        self.calls: tuple[
+            tuple[str, tuple[Message, ...], ToolCall, ToolResult, Path], ...
+        ] = ()
+
+    def attempt_repair(
+        self,
+        *,
+        user_input: str,
+        recent_messages: Sequence[Message],
+        tool_call: ToolCall,
+        tool_result: ToolResult,
+        workspace_root: Path,
+    ) -> ToolResult | None:
+        self.calls = (
+            *self.calls,
+            (user_input, tuple(recent_messages), tool_call, tool_result, workspace_root),
+        )
+        return self.result
+
+
 class SkillCallCapturingModelClient:
     name = "skill-call-capturing-model"
 
@@ -449,18 +490,30 @@ def test_agent_runtime_stops_multiple_tool_calls_after_first_error(
 ) -> None:
     side_effect_tool = SideEffectTool()
 
+    model_client = MultiToolCallWithErrorModelClient()
+
     result = runtime.run_turn(
         session_id="session-1",
         user_input="use multiple tools with error",
-        model_client=MultiToolCallWithErrorModelClient(),
+        model_client=model_client,
         tools=[EchoTool(), side_effect_tool],
         session_store=store,
         workspace_root=tmp_path,
         max_steps=3,
     )
 
-    assert "tool not found: missing" in result.final_message.content
+    assert result.final_message.content == "done"
     assert side_effect_tool.calls == ()
+    assert len(model_client.calls) == 2
+    second_call_messages = model_client.calls[1]
+    assert second_call_messages[-2] == Message(
+        role="assistant",
+        content="",
+        tool_calls=(ToolCall(name="missing", arguments={}, call_id="call_1"),),
+    )
+    assert second_call_messages[-1].role == "tool"
+    assert '"status": "error"' in second_call_messages[-1].content
+    assert '"error_code": "tool_not_found"' in second_call_messages[-1].content
     assert [step.summary for step in result.trace if step.event == "tool"] == [
         "tool not found: missing"
     ]
@@ -481,8 +534,13 @@ def test_agent_runtime_wraps_missing_tool_error(
         max_steps=3,
     )
 
-    assert "tool not found: missing" in result.final_message.content
+    assert result.final_message.content == "Tool result (turn 1): tool not found: missing"
     assert result.trace[0].is_error is True
+    tool_message = result.messages[-2]
+    assert tool_message.role == "tool"
+    assert '"status": "error"' in tool_message.content
+    assert '"error_code": "tool_not_found"' in tool_message.content
+    assert '"available_tools": ["echo"]' in tool_message.content
 
 
 def test_agent_runtime_wraps_tool_exception(
@@ -500,8 +558,104 @@ def test_agent_runtime_wraps_tool_exception(
         max_steps=3,
     )
 
-    assert "tool execution failed: boom" in result.final_message.content
+    assert result.final_message.content == "Tool result (turn 1): tool execution failed; inspect data.message"
     assert result.trace[0].is_error is True
+    tool_message = result.messages[-2]
+    assert tool_message.role == "tool"
+    assert '"status": "error"' in tool_message.content
+    assert '"error_code": "tool_execution_failed"' in tool_message.content
+    assert '"exception_type": "RuntimeError"' in tool_message.content
+    assert '"message": "boom"' in tool_message.content
+
+
+def test_agent_runtime_stops_repeated_tool_error_after_recovery_budget(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    model_client = RepeatingBoomModelClient()
+
+    result = runtime.run_turn(
+        session_id="session-1",
+        user_input="boom repeatedly",
+        model_client=model_client,
+        tools=[BoomTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=4,
+    )
+
+    assert len(model_client.calls) == 2
+    assert result.final_message.content == (
+        "Tool failed repeatedly (tool_execution_failed): "
+        "tool execution failed; inspect data.message"
+    )
+    assert [step.is_error for step in result.trace if step.event == "tool"] == [
+        True,
+        True,
+    ]
+
+
+def test_agent_runtime_uses_optional_repairer_for_repairable_tool_error(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    repairer = RecordingRepairer(
+        ToolResult(
+            name="boom",
+            content="repaired boom",
+            data={"repair_summary": "retried safely"},
+        )
+    )
+
+    result = runtime.run_turn(
+        session_id="session-1",
+        user_input="boom tool",
+        model_client=MockModelClient(),
+        tools=[EchoTool(), BoomTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        tool_error_repairer=repairer,
+    )
+
+    assert result.final_message.content == "Tool result (turn 1): repaired boom"
+    assert len(repairer.calls) == 1
+    user_input, recent_messages, tool_call, tool_result, workspace_root = repairer.calls[0]
+    assert user_input == "boom tool"
+    assert recent_messages == (Message(role="user", content="boom tool"),)
+    assert tool_call == ToolCall(name="boom", arguments={}, call_id="call_boom")
+    assert tool_result.is_error is True
+    assert workspace_root == tmp_path
+    tool_message = result.messages[-2]
+    assert tool_message.role == "tool"
+    assert '"status": "ok"' in tool_message.content
+    assert '"content": "repaired boom"' in tool_message.content
+    assert '"original_error"' in tool_message.content
+    assert result.trace[0].is_error is False
+
+
+def test_agent_runtime_does_not_use_repairer_for_non_repairable_tool_error(
+    runtime: AgentRuntime,
+    store: InMemorySessionStore,
+    tmp_path: Path,
+) -> None:
+    repairer = RecordingRepairer(ToolResult(name="missing", content="unused"))
+
+    result = runtime.run_turn(
+        session_id="session-1",
+        user_input="missing tool",
+        model_client=MockModelClient(),
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        tool_error_repairer=repairer,
+    )
+
+    assert result.final_message.content == "Tool result (turn 1): tool not found: missing"
+    assert repairer.calls == ()
 
 
 def test_agent_runtime_injects_system_prefix_without_persisting_it(

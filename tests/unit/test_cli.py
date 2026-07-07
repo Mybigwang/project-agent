@@ -81,6 +81,9 @@ def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "mcp_config_file": tmp_path / ".project_agent" / "mcp-servers.json",
         "mcp_request_timeout_seconds": 30.0,
         "mcp_max_description_chars": 2048,
+        "tool_error_repair_enabled": False,
+        "tool_error_repair_max_steps": 3,
+        "tool_error_repair_max_worker_result_chars": 4000,
         **overrides,
     }
     return Settings(**values)

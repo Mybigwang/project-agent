@@ -70,6 +70,18 @@ class StreamingModelClient(Protocol):
     ) -> Iterable[str]: ...
 
 
+class ToolErrorRepairerProtocol(Protocol):
+    def attempt_repair(
+        self,
+        *,
+        user_input: str,
+        recent_messages: Sequence[Message],
+        tool_call: ToolCall,
+        tool_result: ToolResult,
+        workspace_root: Path,
+    ) -> ToolResult | None: ...
+
+
 class SessionStore(Protocol):
     def load(self, session_id: str) -> SessionState: ...
 
