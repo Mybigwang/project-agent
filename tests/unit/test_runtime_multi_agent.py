@@ -73,6 +73,67 @@ class CoordinatorModelClient:
         return Message(role="assistant", content="coordinated result")
 
 
+class CoordinatorRepairModelClient:
+    name = "coordinator-repair-model"
+
+    def __init__(self) -> None:
+        self.calls: tuple[tuple[Message, ...], ...] = ()
+
+    def complete(
+        self,
+        *,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        stream_callback: object | None = None,
+    ) -> Message | tuple[ToolCall, ...]:
+        del tools, stream_callback
+        self.calls = (*self.calls, tuple(messages))
+        if len(self.calls) == 1:
+            return (ToolCall(name="boom", arguments={}, call_id="call-boom"),)
+        return Message(role="assistant", content="coordinated repaired")
+
+
+class BoomTool:
+    name = "boom"
+    description = "Fails with a repairable error"
+    input_schema = {"type": "object"}
+    is_read_only = True
+    permission_category = ToolPermissionCategory.READ
+
+    def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult:
+        del workspace_root, arguments
+        return ToolResult(
+            name=self.name,
+            content="boom failed",
+            is_error=True,
+            error_code="tool_execution_failed",
+        )
+
+
+class RecordingRepairer:
+    def __init__(self, result: ToolResult | None) -> None:
+        self.result = result
+        self.calls: tuple[
+            tuple[str, tuple[Message, ...], ToolCall, ToolResult, Path],
+            ...,
+        ] = ()
+
+    def attempt_repair(
+        self,
+        *,
+        user_input: str,
+        recent_messages: Sequence[Message],
+        tool_call: ToolCall,
+        tool_result: ToolResult,
+        workspace_root: Path,
+    ) -> ToolResult | None:
+        self.calls = (
+            *self.calls,
+            (user_input, tuple(recent_messages), tool_call, tool_result, workspace_root),
+        )
+        return self.result
+
+
 class StaticRepositoryContextBuilder:
     def build(
         self,
@@ -304,6 +365,42 @@ def test_coordinator_receives_task_notification(tmp_path: Path) -> None:
     assert result.agents
     assert store.load("parent").agent_runs == result.agents
     assert any("<task-notification>" in message.content for message in model_client.calls[1])
+
+
+def test_coordinator_uses_tool_error_repairer_for_repairable_tool_error(
+    tmp_path: Path,
+) -> None:
+    store = InMemorySessionStore()
+    model_client = CoordinatorRepairModelClient()
+    repairer = RecordingRepairer(
+        ToolResult(
+            name="boom",
+            content="repaired boom",
+            data={"repair_summary": "retried safely"},
+        )
+    )
+
+    result = MultiAgentOrchestrator().run_coordinator_turn(
+        session_id="parent",
+        user_input="coordinate repair",
+        model_client=model_client,
+        tools=[BoomTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        tool_error_repairer=repairer,
+    )
+
+    assert result.final_message.content == "coordinated repaired"
+    assert len(repairer.calls) == 1
+    user_input, recent_messages, tool_call, tool_result, workspace_root = repairer.calls[0]
+    assert user_input == "coordinate repair"
+    assert recent_messages == (Message(role="user", content="coordinate repair"),)
+    assert tool_call == ToolCall(name="boom", arguments={}, call_id="call-boom")
+    assert tool_result.is_error is True
+    assert workspace_root == tmp_path
+    assert '"content": "repaired boom"' in result.messages[-2].content
+    assert '"original_error"' in result.messages[-2].content
 
 
 def test_worker_result_escapes_task_notification_text(tmp_path: Path) -> None:

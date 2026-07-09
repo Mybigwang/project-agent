@@ -449,6 +449,7 @@ def _run_once(
             permission_policy=permission_policy,
             approval_callback=approval_callback if interactive_approval else None,
             context_manager=context_manager,
+            tool_error_repairer=tool_error_repairer,
         )
     else:
         result = runtime.run_turn(

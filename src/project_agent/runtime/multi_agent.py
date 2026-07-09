@@ -14,6 +14,7 @@ from project_agent.core.interfaces import (
     RepositoryContextBuilderProtocol,
     SessionStore,
     Tool,
+    ToolErrorRepairerProtocol,
 )
 from project_agent.core.types import (
     AgentNotification,
@@ -445,6 +446,7 @@ class MultiAgentOrchestrator:
         skill_preprocessor: SkillPromptPreprocessor | None = None,
         permission_policy: PermissionPolicy | None = None,
         approval_callback: ApprovalCallback | None = None,
+        tool_error_repairer: ToolErrorRepairerProtocol | None = None,
     ) -> MultiAgentRunResult:
         before_agents = session_store.load(session_id).agent_runs
         result = self._runtime.run_turn(
@@ -465,6 +467,7 @@ class MultiAgentOrchestrator:
             skill_preprocessor=skill_preprocessor,
             permission_policy=permission_policy,
             approval_callback=approval_callback,
+            tool_error_repairer=tool_error_repairer,
             system_prefix_messages=(Message(role="system", content=COORDINATOR_SYSTEM_PROMPT),),
         )
         after_agents = session_store.load(session_id).agent_runs
