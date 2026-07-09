@@ -122,6 +122,8 @@ def doctor(ctx: typer.Context) -> None:
     typer.echo(f"max_subagent_steps={settings.max_subagent_steps}")
     typer.echo(f"max_worker_result_chars={settings.max_worker_result_chars}")
     typer.echo(f"multi_agent_strict_task_specs={settings.multi_agent_strict_task_specs}")
+    typer.echo(f"mcp_enabled={settings.mcp_enabled}")
+    typer.echo(f"mcp_config_file={settings.mcp_config_file}")
     typer.echo("multi_agent_roles=explore,plan,worker,verification,generalPurpose")
     typer.echo("recursive_subagents_supported=False")
 
