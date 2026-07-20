@@ -113,13 +113,6 @@ class SubagentTool:
                 is_error=True,
                 error_code="max_subagents_exceeded",
             )
-        if arguments.get("run_in_background") is True:
-            return ToolResult(
-                name=self.name,
-                content="run_in_background is not supported yet",
-                is_error=True,
-                error_code="background_not_supported",
-            )
         try:
             spec = _parse_agent_spec(
                 arguments,
@@ -134,6 +127,40 @@ class SubagentTool:
                 content=str(error),
                 is_error=True,
                 error_code=error.error_code,
+            )
+        if spec.run_in_background:
+            ticket = self._orchestrator.run_subagent_in_background(
+                spec=spec,
+                model_client=self._model_client,
+                tools=self._tools,
+                session_store=self._session_store,
+                workspace_root=self._workspace_root,
+                max_steps=self._max_steps,
+                repository_context_builder=self._repository_context_builder,
+                enable_repository_context=self._enable_repository_context,
+                memory_context_builder=self._memory_context_builder,
+                context_manager=self._context_manager,
+                notification_callback=self._notification_callback,
+                skill_registry=self._skill_registry,
+                skill_preprocessor=self._skill_preprocessor,
+                permission_policy=self._permission_policy,
+                approval_callback=self._approval_callback,
+                max_worker_result_chars=self._max_worker_result_chars,
+                parent_user_input=self._parent_user_input,
+            )
+            return ToolResult(
+                name=self.name,
+                content=(
+                    "<task-ticket>\n"
+                    f"<task-id>{ticket.task_id}</task-id>\n"
+                    f"<status>{ticket.status}</status>\n"
+                    "</task-ticket>"
+                ),
+                data={
+                    "task_id": ticket.task_id,
+                    "status": ticket.status,
+                    "run_in_background": True,
+                },
             )
         record = self._orchestrator.run_subagent(
             spec=spec,
@@ -163,6 +190,7 @@ class SubagentTool:
             ),
         )
         safe_result = format_task_notification(safe_notification_record)
+        structured_result = record.structured_result
         return ToolResult(
             name=self.name,
             content=safe_result,
@@ -174,10 +202,16 @@ class SubagentTool:
                 "summary": record.result_summary or record.description,
                 "role": record.role,
                 "verdict": record.verdict,
-                "evidence": list(record.structured_result.evidence) if record.structured_result else [],
-                "touched_files": list(record.structured_result.touched_files) if record.structured_result else [],
-                "commands_run": list(record.structured_result.commands_run) if record.structured_result else [],
-                "open_questions": list(record.structured_result.open_questions) if record.structured_result else [],
+                "evidence": list(structured_result.evidence) if structured_result else [],
+                "touched_files": (
+                    list(structured_result.touched_files) if structured_result else []
+                ),
+                "commands_run": (
+                    list(structured_result.commands_run) if structured_result else []
+                ),
+                "open_questions": (
+                    list(structured_result.open_questions) if structured_result else []
+                ),
                 "result": safe_result,
                 "result_trust": "untrusted-worker-output",
             },
@@ -240,7 +274,10 @@ def _parse_role(value: object, *, default_role: AgentRole) -> AgentRole:
     role = _optional_string(value) or default_role
     allowed_roles = {"explore", "plan", "worker", "verification", "generalPurpose"}
     if role == "coordinator":
-        raise AgentSpecError("coordinator role cannot run as a child agent", error_code="role_not_allowed")
+        raise AgentSpecError(
+            "coordinator role cannot run as a child agent",
+            error_code="role_not_allowed",
+        )
     if role not in allowed_roles:
         raise AgentSpecError(f"unknown subagent_type: {role}", error_code="role_not_allowed")
     return role  # type: ignore[return-value]
@@ -260,22 +297,30 @@ def _validate_task_spec(*, role: AgentRole, prompt: str, description: str) -> No
         raise AgentSpecError("agent task spec is too vague", error_code="task_spec_too_vague")
     if role in {"worker", "generalPurpose"} and not _has_worker_specificity(text):
         raise AgentSpecError(
-            "worker task spec must include a path, scope, acceptance criteria, or verification guidance",
+            "worker task spec must include a path, scope, acceptance criteria, "
+            "or verification guidance",
             error_code="task_spec_too_vague",
         )
     if role == "verification" and not _has_verification_intent(text):
         raise AgentSpecError(
-            "verification task spec must include a test, check, lint, build, probe, or verify instruction",
+            "verification task spec must include a test, check, lint, build, "
+            "probe, or verify instruction",
             error_code="task_spec_too_vague",
         )
 
 
 def _has_worker_specificity(text: str) -> bool:
-    return any(token in text for token in ("/", ".py", "test", "verify", "accept", "scope", "file"))
+    return any(
+        token in text
+        for token in ("/", ".py", "test", "verify", "accept", "scope", "file")
+    )
 
 
 def _has_verification_intent(text: str) -> bool:
-    return any(token in text for token in ("test", "pytest", "check", "lint", "build", "probe", "verify"))
+    return any(
+        token in text
+        for token in ("test", "pytest", "check", "lint", "build", "probe", "verify")
+    )
 
 
 def _optional_string(value: Any) -> str | None:

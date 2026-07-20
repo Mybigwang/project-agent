@@ -151,6 +151,8 @@ class AgentRuntime:
             )
             step += 1
             task_result = self._run_task(
+                session_id=session_id,
+                session_store=session_store,
                 task=self._require_task(task_plan, task.id),
                 task_plan=task_plan,
                 user_input=user_input,
@@ -249,14 +251,13 @@ class AgentRuntime:
             )
             messages = messages + (final_message,)
 
-        session_store.save(
-            session_id,
-            replace(
-                session_store.load(session_id),
-                messages=messages,
-                task_plan=task_plan,
-                context_state=context_state,
-            ),
+        messages = self._save_turn_state(
+            session_store=session_store,
+            session_id=session_id,
+            messages=messages,
+            task_plan=task_plan,
+            update_task_plan=True,
+            context_state=context_state,
         )
         return RunResult(
             final_message=final_message,
@@ -324,8 +325,34 @@ class AgentRuntime:
         skill_calls_used = 0
         consecutive_tool_error_rounds = 0
         last_tool_error_signature: tuple[str, str, str | None] | None = None
+        pending_background_task_ids: tuple[str, ...] = ()
 
         for step in range(1, max_steps + 1):
+            (
+                messages,
+                pending_background_task_ids,
+                collected_background_results,
+            ) = self._collect_completed_background_messages(
+                session_id=session_id,
+                session_store=session_store,
+                messages=messages,
+                pending_task_ids=pending_background_task_ids,
+            )
+            if collected_background_results:
+                model_messages, context_state = self._build_model_messages(
+                    history=history,
+                    messages=messages,
+                    user_input=user_input,
+                    workspace_root=workspace_root,
+                    repository_context_builder=repository_context_builder,
+                    enable_repository_context=enable_repository_context,
+                    memory_context=memory_context,
+                    skill_registry=skill_registry,
+                    task_plan=None,
+                    existing_context_state=context_state,
+                    context_manager=context_manager,
+                    system_prefix_messages=system_prefix_messages,
+                )
             response = model_client.complete(
                 messages=model_messages,
                 tools=registry.tools,
@@ -333,13 +360,11 @@ class AgentRuntime:
             )
             if isinstance(response, Message):
                 final_messages = messages + (response,)
-                session_store.save(
-                    session_id,
-                    replace(
-                        session_store.load(session_id),
-                        messages=final_messages,
-                        context_state=context_state,
-                    ),
+                final_messages = self._save_turn_state(
+                    session_store=session_store,
+                    session_id=session_id,
+                    messages=final_messages,
+                    context_state=context_state,
                 )
                 trace = trace + (
                     AgentTraceStep(
@@ -402,6 +427,10 @@ class AgentRuntime:
                 messages=messages,
                 workspace_root=workspace_root,
             )
+            pending_background_task_ids = _append_background_task_ids(
+                pending_task_ids=pending_background_task_ids,
+                tool_results=tool_results,
+            )
             assistant_tool_message = Message(
                 role="assistant", content="", tool_calls=executed_tool_calls
             )
@@ -457,13 +486,11 @@ class AgentRuntime:
                         content=self._tool_error_summary(tool_results[-1]),
                     )
                     final_messages = messages + (final_message,)
-                    session_store.save(
-                        session_id,
-                        replace(
-                            session_store.load(session_id),
-                            messages=final_messages,
-                            context_state=context_state,
-                        ),
+                    final_messages = self._save_turn_state(
+                        session_store=session_store,
+                        session_id=session_id,
+                        messages=final_messages,
+                        context_state=context_state,
                     )
                     return RunResult(
                         final_message=final_message,
@@ -478,9 +505,75 @@ class AgentRuntime:
 
         raise RuntimeLimitError(max_steps)
 
+    def _collect_completed_background_messages(
+        self,
+        *,
+        session_id: str,
+        session_store: SessionStore,
+        messages: tuple[Message, ...],
+        pending_task_ids: tuple[str, ...],
+    ) -> tuple[tuple[Message, ...], tuple[str, ...], bool]:
+        if not pending_task_ids:
+            return messages, pending_task_ids, False
+
+        pending_task_id_set = frozenset(pending_task_ids)
+        completed_by_task_id = {
+            message.tool_call_id: message
+            for message in session_store.load(session_id).messages
+            if message.role == "tool"
+            and message.tool_call_id in pending_task_id_set
+            and "<task-notification>" in message.content
+        }
+        if not completed_by_task_id:
+            return messages, pending_task_ids, False
+
+        collected_messages = tuple(
+            completed_by_task_id[task_id]
+            for task_id in pending_task_ids
+            if task_id in completed_by_task_id
+        )
+        merged_messages = messages
+        for message in collected_messages:
+            if message not in merged_messages:
+                merged_messages = (*merged_messages, message)
+        remaining_task_ids = tuple(
+            task_id
+            for task_id in pending_task_ids
+            if task_id not in completed_by_task_id
+        )
+        return merged_messages, remaining_task_ids, True
+
+    def _save_turn_state(
+        self,
+        *,
+        session_store: SessionStore,
+        session_id: str,
+        messages: tuple[Message, ...],
+        task_plan: TaskPlan | None = None,
+        update_task_plan: bool = False,
+        context_state: ContextManagementState | None = None,
+    ) -> tuple[Message, ...]:
+        current_state = session_store.load(session_id)
+        merged_messages = _merge_concurrent_appended_messages(
+            base_messages=messages,
+            current_messages=current_state.messages,
+        )
+        session_store.save(
+            session_id,
+            replace(
+                current_state,
+                messages=merged_messages,
+                task_plan=task_plan if update_task_plan else current_state.task_plan,
+                context_state=context_state,
+            ),
+        )
+        return merged_messages
+
     def _run_task(
         self,
         *,
+        session_id: str,
+        session_store: SessionStore,
         task: Task,
         task_plan: TaskPlan,
         user_input: str,
@@ -529,8 +622,35 @@ class AgentRuntime:
         skill_calls_used = 0
         consecutive_tool_error_rounds = 0
         last_tool_error_signature: tuple[str, str, str | None] | None = None
+        pending_background_task_ids: tuple[str, ...] = ()
 
         while task_step < max_steps:
+            (
+                messages,
+                pending_background_task_ids,
+                collected_background_results,
+            ) = self._collect_completed_background_messages(
+                session_id=session_id,
+                session_store=session_store,
+                messages=messages,
+                pending_task_ids=pending_background_task_ids,
+            )
+            if collected_background_results:
+                model_messages, context_state = self._build_model_messages(
+                    history=history,
+                    messages=messages,
+                    user_input=user_input,
+                    workspace_root=workspace_root,
+                    repository_context_builder=repository_context_builder,
+                    enable_repository_context=enable_repository_context,
+                    memory_context=memory_context,
+                    skill_registry=skill_registry,
+                    task_plan=task_plan,
+                    existing_context_state=context_state,
+                    context_manager=context_manager,
+                    prefix_messages=(task_context_message,),
+                    system_prefix_messages=system_prefix_messages,
+                )
             response = model_client.complete(
                 messages=model_messages,
                 tools=registry.tools,
@@ -605,6 +725,10 @@ class AgentRuntime:
                 user_input=user_input,
                 messages=messages,
                 workspace_root=workspace_root,
+            )
+            pending_background_task_ids = _append_background_task_ids(
+                pending_task_ids=pending_background_task_ids,
+                tool_results=tool_results,
             )
             assistant_tool_message = Message(
                 role="assistant", content="", tool_calls=executed_tool_calls
@@ -1143,3 +1267,34 @@ class _TaskRunResult:
         self.final_message = final_message
         self.error = error
         self.context_state = context_state
+
+
+def _merge_concurrent_appended_messages(
+    *,
+    base_messages: tuple[Message, ...],
+    current_messages: tuple[Message, ...],
+) -> tuple[Message, ...]:
+    if current_messages[: len(base_messages)] == base_messages:
+        return current_messages
+
+    merged_messages = base_messages
+    for message in current_messages:
+        if message not in merged_messages:
+            merged_messages = (*merged_messages, message)
+    return merged_messages
+
+
+def _append_background_task_ids(
+    *,
+    pending_task_ids: tuple[str, ...],
+    tool_results: tuple[ToolResult, ...],
+) -> tuple[str, ...]:
+    updated_task_ids = pending_task_ids
+    for tool_result in tool_results:
+        data = tool_result.data
+        if data is None or data.get("run_in_background") is not True:
+            continue
+        task_id = data.get("task_id")
+        if isinstance(task_id, str) and task_id not in updated_task_ids:
+            updated_task_ids = (*updated_task_ids, task_id)
+    return updated_task_ids
