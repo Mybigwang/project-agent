@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 from project_agent.core.types import ToolResult
 from project_agent.runtime.permissions.types import ToolPermissionCategory
+from project_agent.runtime.sandbox import DirectSandboxRunner, SandboxMode, SandboxRunner
 
 
 class RunCommandTool:
@@ -20,9 +20,16 @@ class RunCommandTool:
     is_read_only = False
     permission_category = ToolPermissionCategory.EXECUTE
 
-    def __init__(self, *, timeout_seconds: float, max_output_chars: int) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float,
+        max_output_chars: int,
+        sandbox_runner: SandboxRunner | None = None,
+    ) -> None:
         self._timeout_seconds = timeout_seconds
         self._max_output_chars = max_output_chars
+        self._sandbox_runner = sandbox_runner or DirectSandboxRunner(mode=SandboxMode.FULL_ACCESS)
 
     def run(self, *, workspace_root: Path, arguments: dict[str, object]) -> ToolResult:
         argv = arguments.get("argv")
@@ -39,19 +46,12 @@ class RunCommandTool:
                 data={"argv": argv},
             )
 
-        try:
-            completed = subprocess.run(
-                argv,
-                cwd=workspace_root,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self._timeout_seconds,
-                shell=False,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
+        completed = self._sandbox_runner.run(
+            argv=argv,
+            cwd=workspace_root,
+            timeout_seconds=self._timeout_seconds,
+        )
+        if completed.timed_out:
             return ToolResult(
                 name=self.name,
                 content=(
@@ -62,9 +62,27 @@ class RunCommandTool:
                 data={
                     "argv": argv,
                     "timeout_seconds": self._timeout_seconds,
+                    "sandbox_mode": completed.sandbox_mode.value,
+                    "sandbox_backend": completed.sandbox_backend,
+                    "sandboxed": completed.sandboxed,
                 },
             )
-        except OSError as error:
+        if completed.error_code == "sandbox_failed":
+            return ToolResult(
+                name=self.name,
+                content="sandbox failed; inspect data.message",
+                is_error=True,
+                error_code="sandbox_failed",
+                data={
+                    "argv": argv,
+                    "exception_type": completed.error_type or "SandboxUnavailableError",
+                    "message": completed.error_message or "",
+                    "sandbox_mode": completed.sandbox_mode.value,
+                    "sandbox_backend": completed.sandbox_backend,
+                    "sandboxed": completed.sandboxed,
+                },
+            )
+        if completed.error_code == "command_execution_failed":
             return ToolResult(
                 name=self.name,
                 content="failed to run command; inspect data.message",
@@ -72,8 +90,11 @@ class RunCommandTool:
                 error_code="command_execution_failed",
                 data={
                     "argv": argv,
-                    "exception_type": type(error).__name__,
-                    "message": str(error),
+                    "exception_type": completed.error_type or "OSError",
+                    "message": completed.error_message or "",
+                    "sandbox_mode": completed.sandbox_mode.value,
+                    "sandbox_backend": completed.sandbox_backend,
+                    "sandboxed": completed.sandboxed,
                 },
             )
 
@@ -81,12 +102,13 @@ class RunCommandTool:
         stderr_truncated = len(completed.stderr) > self._max_output_chars
         stdout = completed.stdout[: self._max_output_chars].rstrip("\n")
         stderr = completed.stderr[: self._max_output_chars].rstrip("\n")
-        is_error = completed.returncode != 0
+        exit_code = completed.exit_code if completed.exit_code is not None else 1
+        is_error = exit_code != 0
         content = (
-            f"command failed with exit code {completed.returncode}; "
+            f"command failed with exit code {exit_code}; "
             "inspect data.stdout/data.stderr"
             if is_error
-            else f"command exited with code {completed.returncode}"
+            else f"command exited with code {exit_code}"
         )
         return ToolResult(
             name=self.name,
@@ -94,12 +116,15 @@ class RunCommandTool:
             is_error=is_error,
             data={
                 "argv": argv,
-                "exit_code": completed.returncode,
+                "exit_code": exit_code,
                 "stdout": stdout,
                 "stderr": stderr,
                 "stdout_truncated": stdout_truncated,
                 "stderr_truncated": stderr_truncated,
                 "timeout_seconds": self._timeout_seconds,
+                "sandbox_mode": completed.sandbox_mode.value,
+                "sandbox_backend": completed.sandbox_backend,
+                "sandboxed": completed.sandboxed,
             },
             error_code="command_failed" if is_error else None,
         )

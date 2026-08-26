@@ -15,6 +15,7 @@ from project_agent.runtime.mcp import (
     build_mcp_tool_name,
     load_mcp_config,
 )
+from project_agent.runtime.sandbox import SandboxMode
 
 
 def test_build_mcp_tool_name_uses_stable_namespace() -> None:
@@ -81,7 +82,7 @@ def test_load_mcp_config_rejects_missing_env_reference(tmp_path: Path) -> None:
 def test_build_github_mcp_config_uses_token_reference() -> None:
     config = build_github_mcp_config()
 
-    assert config["mcpServers"]["github"]["command"] == "npx"
+    assert config["mcpServers"]["github"]["command"] == "npx.cmd"
     assert config["mcpServers"]["github"]["args"] == [
         "-y",
         "@modelcontextprotocol/server-github",
@@ -143,6 +144,40 @@ def test_mcp_client_lists_tools_over_stdio(monkeypatch: pytest.MonkeyPatch) -> N
     assert tools[0].input_schema["properties"] == {"owner": {"type": "string"}}
     assert json.loads(process.stdin.writes[0])["method"] == "initialize"
     assert json.loads(process.stdin.writes[1])["method"] == "tools/list"
+
+
+def test_mcp_client_starts_process_through_sandbox_runner(tmp_path: Path) -> None:
+    process = _FakeProcess(
+        responses=[
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "serverInfo": {"name": "fake-github", "version": "1.0.0"},
+                },
+            },
+            {"jsonrpc": "2.0", "id": 2, "result": {"tools": []}},
+        ]
+    )
+    runner = _FakeSandboxRunner(process)
+    client = McpStdioClient(
+        McpServerConfig(
+            name="github",
+            type="stdio",
+            command="npx.cmd",
+            args=("-y", "@modelcontextprotocol/server-github"),
+            env={"GITHUB_TOKEN": "secret"},
+        ),
+        workspace_root=tmp_path,
+        sandbox_runner=runner,
+    )
+
+    client.list_tools()
+
+    assert runner.argv == ("npx.cmd", "-y", "@modelcontextprotocol/server-github")
+    assert runner.cwd == tmp_path
 
 
 def test_mcp_tool_invokes_remote_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -262,3 +297,28 @@ class _FakeMcpClient:
     def call_tool(self, *, tool_name: str, arguments: dict[str, object]) -> dict[str, object]:
         del tool_name, arguments
         return self._response
+
+
+class _FakeSandboxRunner:
+    def __init__(self, process: _FakeProcess) -> None:
+        self._process = process
+        self.argv: tuple[str, ...] = ()
+        self.cwd: Path | None = None
+
+    @property
+    def mode(self) -> SandboxMode:
+        return SandboxMode.WORKSPACE_WRITE
+
+    @property
+    def backend_name(self) -> str:
+        return "fake"
+
+    @property
+    def sandboxed(self) -> bool:
+        return True
+
+    def popen(self, *, argv, cwd, env=None, stdin=None, stdout=None, stderr=None):  # type: ignore[no-untyped-def]
+        del env, stdin, stdout, stderr
+        self.argv = tuple(argv)
+        self.cwd = cwd
+        return self._process

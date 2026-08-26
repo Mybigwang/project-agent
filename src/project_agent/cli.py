@@ -51,6 +51,7 @@ from project_agent.runtime.permissions import PermissionPolicy
 from project_agent.runtime.permissions.policy import load_permission_rules
 from project_agent.runtime.permissions.types import PermissionRule
 from project_agent.runtime.planner import LLMPlanner
+from project_agent.runtime.sandbox import SandboxMode, build_sandbox_runner
 from project_agent.runtime.session_store import FileSessionStore
 from project_agent.runtime.tool_error_repair import SubagentToolErrorRepairer
 from project_agent.runtime.tools import EchoTool, build_default_tools
@@ -73,6 +74,7 @@ WORKSPACE_ROOT_OPTION = typer.Option(None, "--workspace-root")
 LOG_LEVEL_OPTION = typer.Option(None, "--log-level")
 DEFAULT_MODEL_OPTION = typer.Option(None, "--default-model")
 ENVIRONMENT_OPTION = typer.Option(None, "--environment")
+SANDBOX_OPTION = typer.Option(None, "--sandbox")
 CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x1b]")
 
 app = typer.Typer(help="Project Agent CLI.")
@@ -88,6 +90,7 @@ def main(
     log_level: str | None = LOG_LEVEL_OPTION,
     default_model: str | None = DEFAULT_MODEL_OPTION,
     environment: str | None = ENVIRONMENT_OPTION,
+    sandbox: str | None = SANDBOX_OPTION,
 ) -> None:
     overrides = {
         key: value
@@ -96,6 +99,7 @@ def main(
             "log_level": log_level,
             "default_model": default_model,
             "environment": environment,
+            "sandbox_mode": sandbox,
         }.items()
         if value is not None
     }
@@ -114,6 +118,7 @@ def doctor(ctx: typer.Context) -> None:
     typer.echo(f"model_api_key_configured={settings.model_api_key is not None}")
     typer.echo(f"prompt_cache={settings.prompt_cache}")
     typer.echo(f"environment={settings.environment}")
+    typer.echo(f"sandbox_mode={settings.sandbox_mode.value}")
     typer.echo(f"memory_enabled={settings.memory_enabled}")
     typer.echo(f"memory_dir={settings.memory_dir}")
     typer.echo(f"multi_agent_enabled={settings.multi_agent_enabled}")
@@ -164,12 +169,15 @@ def run(
     runtime = AgentRuntime()
     model_client = _build_model_client(settings)
     session_store = FileSessionStore(settings.session_store_dir)
+    command_sandbox_runner = build_sandbox_runner(mode=settings.sandbox_mode)
+    context_sandbox_runner = build_sandbox_runner(mode=SandboxMode.READ_ONLY)
     tools: list[Tool] = [
         EchoTool(),
         *build_default_tools(
             max_file_read_chars=settings.max_file_read_chars,
             command_timeout_seconds=settings.command_timeout_seconds,
             max_command_output_chars=settings.max_command_output_chars,
+            sandbox_runner=command_sandbox_runner,
         ),
     ]
     if settings.mcp_enabled:
@@ -178,6 +186,8 @@ def run(
                 config_path=settings.mcp_config_file,
                 request_timeout_seconds=settings.mcp_request_timeout_seconds,
                 max_description_chars=settings.mcp_max_description_chars,
+                workspace_root=settings.workspace_root,
+                sandbox_runner=command_sandbox_runner,
             )
         )
     repository_context_builder = RepositoryContextBuilder(
@@ -188,6 +198,7 @@ def run(
         max_relevant_file_chars=settings.max_relevant_file_chars,
         recent_commits_count=settings.recent_commits_count,
         context_command_timeout_seconds=settings.context_command_timeout_seconds,
+        sandbox_runner=context_sandbox_runner,
     )
     skill_registry = _build_skill_registry(settings)
     permission_policy = _build_permission_policy(settings)

@@ -13,6 +13,7 @@ from project_agent.core.interfaces import Tool
 from project_agent.core.types import ToolResult
 from project_agent.errors import ConfigurationError
 from project_agent.runtime.permissions.types import ToolPermissionCategory
+from project_agent.runtime.sandbox import DirectSandboxRunner, SandboxMode, SandboxRunner
 
 McpTransportType = Literal["stdio", "sse", "ws", "http", "streamable-http"]
 MAX_MCP_DESCRIPTION_LENGTH = 2048
@@ -118,6 +119,8 @@ def build_mcp_tools(
     request_timeout_seconds: float,
     max_description_chars: int = MAX_MCP_DESCRIPTION_LENGTH,
     environment: Mapping[str, str] | None = None,
+    workspace_root: Path | None = None,
+    sandbox_runner: SandboxRunner | None = None,
 ) -> list[Tool]:
     config = load_mcp_config(config_path=config_path, environment=environment)
     tools: list[Tool] = []
@@ -126,7 +129,12 @@ def build_mcp_tools(
             continue
         if server.type != "stdio":
             continue
-        client = McpStdioClient(server, request_timeout_seconds=request_timeout_seconds)
+        client = McpStdioClient(
+            server,
+            request_timeout_seconds=request_timeout_seconds,
+            workspace_root=workspace_root or config_path.parent,
+            sandbox_runner=sandbox_runner,
+        )
         for tool in client.list_tools(max_description_chars=max_description_chars):
             tools.append(tool)
     return tools
@@ -138,6 +146,8 @@ class McpStdioClient:
         server: McpServerConfig,
         *,
         request_timeout_seconds: float = 30.0,
+        workspace_root: Path | None = None,
+        sandbox_runner: SandboxRunner | None = None,
     ) -> None:
         if server.type != "stdio":
             raise ConfigurationError(
@@ -147,6 +157,8 @@ class McpStdioClient:
             raise ConfigurationError(f"MCP stdio server {server.name} requires command")
         self._server = server
         self._request_timeout_seconds = request_timeout_seconds
+        self._workspace_root = workspace_root or Path.cwd()
+        self._sandbox_runner = sandbox_runner or DirectSandboxRunner(mode=SandboxMode.FULL_ACCESS)
         self._process: subprocess.Popen[str] | None = None
         self._next_id = 1
         self._lock = threading.Lock()
@@ -233,13 +245,12 @@ class McpStdioClient:
         env = os.environ.copy()
         if self._server.env:
             env.update(self._server.env)
-        self._process = subprocess.Popen(
-            [self._server.command, *self._server.args],
+        self._process = self._sandbox_runner.popen(
+            argv=[self._server.command, *self._server.args],
+            cwd=self._workspace_root,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
             env=env,
         )
 

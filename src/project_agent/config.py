@@ -8,6 +8,7 @@ from pathlib import Path
 
 from project_agent.errors import ConfigurationError
 from project_agent.runtime.permissions import PermissionMode
+from project_agent.runtime.sandbox import SandboxMode
 
 VALID_LOG_LEVELS = frozenset({"critical", "error", "warning", "info", "debug"})
 VALID_PROMPT_CACHE_MODES = frozenset({"auto", "on", "off"})
@@ -45,6 +46,7 @@ class Settings:
     skills_max_expansion_chars: int
     permission_mode: PermissionMode
     permission_rules_file: Path | None
+    sandbox_mode: SandboxMode
     context_window_tokens: int
     context_trigger_fill_ratio: float
     context_recover_fill_ratio: float
@@ -315,6 +317,15 @@ def load_settings(
             ),
         ),
         workspace_root=workspace_root,
+    )
+    sandbox_mode = _parse_sandbox_mode(
+        override_values.get(
+            "sandbox_mode",
+            os.getenv(
+                "PROJECT_AGENT_SANDBOX_MODE",
+                config_values.get("sandbox_mode", "workspace_write"),
+            ),
+        )
     )
     context_window_tokens = int(
         override_values.get(
@@ -678,6 +689,7 @@ def load_settings(
         skills_max_expansion_chars=skills_max_expansion_chars,
         permission_mode=permission_mode,
         permission_rules_file=permission_rules_file,
+        sandbox_mode=sandbox_mode,
         context_window_tokens=context_window_tokens,
         context_trigger_fill_ratio=context_trigger_fill_ratio,
         context_recover_fill_ratio=context_recover_fill_ratio,
@@ -762,6 +774,13 @@ def _parse_permission_mode(value: str) -> PermissionMode:
         return PermissionMode(value.strip().lower())
     except ValueError as error:
         raise ConfigurationError(f"invalid permission mode: {value}") from error
+
+
+def _parse_sandbox_mode(value: str) -> SandboxMode:
+    try:
+        return SandboxMode(value.strip().lower())
+    except ValueError as error:
+        raise ConfigurationError(f"invalid sandbox mode: {value}") from error
 
 
 def _validate_log_level(log_level: str) -> None:
