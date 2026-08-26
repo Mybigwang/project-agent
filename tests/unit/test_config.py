@@ -5,6 +5,7 @@ import pytest
 from project_agent.config import load_settings
 from project_agent.errors import ConfigurationError
 from project_agent.runtime.permissions import PermissionMode
+from project_agent.runtime.sandbox import SandboxMode
 
 
 def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -54,6 +55,7 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PROJECT_AGENT_MEMORY_MAX_RELEVANT_FILES", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_MEMORY_MAX_RELEVANT_FILE_CHARS", raising=False)
     monkeypatch.delenv("PROJECT_AGENT_MEMORY_MAX_MANIFEST_FILES", raising=False)
+    monkeypatch.delenv("PROJECT_AGENT_SANDBOX_MODE", raising=False)
 
     settings = load_settings()
 
@@ -87,6 +89,7 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.skills_max_expansion_chars == 20000
     assert settings.permission_mode == PermissionMode.DEFAULT
     assert settings.permission_rules_file is None
+    assert settings.sandbox_mode == SandboxMode.WORKSPACE_WRITE
     assert settings.context_window_tokens == 200000
     assert settings.context_trigger_fill_ratio == 0.87
     assert settings.context_recover_fill_ratio == 0.82
@@ -511,6 +514,36 @@ def test_load_settings_supports_permission_settings(
 
     assert settings.permission_mode == PermissionMode.PLAN
     assert settings.permission_rules_file == (tmp_path / "cli-rules.toml").resolve()
+
+
+def test_load_settings_supports_sandbox_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[project_agent]\nsandbox_mode = 'read_only'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROJECT_AGENT_SANDBOX_MODE", "workspace_write")
+
+    settings = load_settings(
+        config_path=config_path,
+        overrides={"sandbox_mode": "full_access"},
+    )
+
+    assert settings.sandbox_mode == SandboxMode.FULL_ACCESS
+
+
+def test_load_settings_rejects_invalid_sandbox_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[project_agent]\nsandbox_mode = 'invalid'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="invalid sandbox mode"):
+        load_settings(config_path=config_path)
 
 
 def test_load_settings_rejects_invalid_permission_mode(tmp_path: Path) -> None:

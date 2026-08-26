@@ -16,6 +16,7 @@ from project_agent.runtime.context.git import GitContextCollector
 from project_agent.runtime.context.relevance import RelevantFileCollector
 from project_agent.runtime.context.rules import RuleLoader
 from project_agent.runtime.context.workspace import WorkspaceContextCollector
+from project_agent.runtime.sandbox import SandboxRunner
 
 SECRET_VALUE = "[REDACTED]"
 SECRET_ASSIGNMENT_PATTERN = re.compile(
@@ -41,6 +42,7 @@ class RepositoryContextBuilder:
         max_relevant_file_chars: int,
         recent_commits_count: int,
         context_command_timeout_seconds: float,
+        sandbox_runner: SandboxRunner | None = None,
     ) -> None:
         self.max_repository_context_chars = max_repository_context_chars
         self.max_git_diff_chars = max_git_diff_chars
@@ -54,6 +56,7 @@ class RepositoryContextBuilder:
             timeout_seconds=context_command_timeout_seconds,
             max_diff_chars=max_git_diff_chars,
             recent_commits_count=recent_commits_count,
+            sandbox_runner=sandbox_runner,
         )
         self._rule_loader = RuleLoader(max_rule_file_chars=max_rule_file_chars)
         self._relevant_file_collector = RelevantFileCollector(

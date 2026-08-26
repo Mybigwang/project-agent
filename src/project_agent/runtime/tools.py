@@ -4,7 +4,6 @@ from pathlib import Path
 
 from project_agent.core.interfaces import Tool
 from project_agent.core.types import ToolResult
-from project_agent.runtime.permissions.types import ToolPermissionCategory
 from project_agent.runtime.local_tools import RunCommandTool
 from project_agent.runtime.local_tools.filesystem import (
     EditFileTool,
@@ -13,6 +12,8 @@ from project_agent.runtime.local_tools.filesystem import (
     WriteFileTool,
 )
 from project_agent.runtime.local_tools.search import SearchCodeTool
+from project_agent.runtime.permissions.types import ToolPermissionCategory
+from project_agent.runtime.sandbox import SandboxRunner
 
 
 class EchoTool:
@@ -30,7 +31,11 @@ class EchoTool:
 
 
 def build_default_tools(
-    *, max_file_read_chars: int, command_timeout_seconds: float, max_command_output_chars: int
+    *,
+    max_file_read_chars: int,
+    command_timeout_seconds: float,
+    max_command_output_chars: int,
+    sandbox_runner: SandboxRunner | None = None,
 ) -> list[Tool]:
     return [
         ReadFileTool(max_chars=max_file_read_chars),
@@ -39,6 +44,8 @@ def build_default_tools(
         ListFilesTool(),
         SearchCodeTool(),
         RunCommandTool(
-            timeout_seconds=command_timeout_seconds, max_output_chars=max_command_output_chars
+            timeout_seconds=command_timeout_seconds,
+            max_output_chars=max_command_output_chars,
+            sandbox_runner=sandbox_runner,
         ),
     ]

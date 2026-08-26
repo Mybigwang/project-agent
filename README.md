@@ -40,6 +40,12 @@ Supported environment variables:
 - `PROJECT_AGENT_API_KEY`
 - `PROJECT_AGENT_PROMPT_CACHE` (`auto`, `on`, or `off`; default `auto`)
 - `PROJECT_AGENT_ENVIRONMENT`
+- `PROJECT_AGENT_SANDBOX_MODE` (`read_only`, `workspace_write`, or `full_access`)
+
+Process-starting tools run through the configured sandbox mode. On Windows,
+`read_only` and `workspace_write` use a Job Object backend to contain the
+process tree and fail closed if the sandbox cannot be created. `full_access`
+runs directly and is intended for explicitly trusted local debugging.
 
 For real model calls, configure any OpenAI-compatible chat completions endpoint:
 

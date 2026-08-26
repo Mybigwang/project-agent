@@ -10,6 +10,7 @@ from project_agent.config import Settings
 from project_agent.core.types import AgentTraceStep, Message, SkillCall, Task, TaskPlan
 from project_agent.errors import AgentError, ConfigurationError
 from project_agent.runtime.permissions import PermissionMode
+from project_agent.runtime.sandbox import SandboxMode
 
 runner = CliRunner()
 
@@ -52,6 +53,7 @@ def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "skills_max_expansion_chars": 20000,
         "permission_mode": PermissionMode.DEFAULT,
         "permission_rules_file": None,
+        "sandbox_mode": SandboxMode.WORKSPACE_WRITE,
         "context_window_tokens": 200000,
         "context_trigger_fill_ratio": 0.87,
         "context_recover_fill_ratio": 0.82,
@@ -113,6 +115,7 @@ def test_doctor_command_uses_cli_overrides(tmp_path: Path) -> None:
     assert f"workspace_root={tmp_path.resolve()}" in result.stdout
     assert "model_api_key_configured=False" in result.stdout
     assert "prompt_cache=auto" in result.stdout
+    assert "sandbox_mode=workspace_write" in result.stdout
     assert "memory_enabled=True" in result.stdout
     assert (
         f"memory_dir={(tmp_path / '.project_agent' / 'memory').resolve()}"
