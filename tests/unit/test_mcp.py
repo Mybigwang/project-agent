@@ -180,6 +180,19 @@ def test_mcp_client_starts_process_through_sandbox_runner(tmp_path: Path) -> Non
     assert runner.cwd == tmp_path
 
 
+def test_mcp_client_reports_stderr_when_server_closes_stdout() -> None:
+    process = _FakeProcess(responses=[])
+    process.stderr = _FakeStream(["npm EACCES\n"])
+    runner = _FakeSandboxRunner(process)
+    client = McpStdioClient(
+        McpServerConfig(name="github", type="stdio", command="npx"),
+        sandbox_runner=runner,
+    )
+
+    with pytest.raises(RuntimeError, match="npm EACCES"):
+        client._request(method="initialize", params={})
+
+
 def test_mcp_tool_invokes_remote_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     process = _FakeProcess(
         responses=[

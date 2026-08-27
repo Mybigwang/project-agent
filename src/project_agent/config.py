@@ -47,6 +47,7 @@ class Settings:
     permission_mode: PermissionMode
     permission_rules_file: Path | None
     sandbox_mode: SandboxMode
+    mcp_sandbox_mode: SandboxMode
     context_window_tokens: int
     context_trigger_fill_ratio: float
     context_recover_fill_ratio: float
@@ -324,6 +325,15 @@ def load_settings(
             os.getenv(
                 "PROJECT_AGENT_SANDBOX_MODE",
                 config_values.get("sandbox_mode", "workspace_write"),
+            ),
+        )
+    )
+    mcp_sandbox_mode = _parse_sandbox_mode(
+        override_values.get(
+            "mcp_sandbox_mode",
+            os.getenv(
+                "PROJECT_AGENT_MCP_SANDBOX_MODE",
+                config_values.get("mcp_sandbox_mode", sandbox_mode.value),
             ),
         )
     )
@@ -690,6 +700,7 @@ def load_settings(
         permission_mode=permission_mode,
         permission_rules_file=permission_rules_file,
         sandbox_mode=sandbox_mode,
+        mcp_sandbox_mode=mcp_sandbox_mode,
         context_window_tokens=context_window_tokens,
         context_trigger_fill_ratio=context_trigger_fill_ratio,
         context_recover_fill_ratio=context_recover_fill_ratio,

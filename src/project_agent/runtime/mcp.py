@@ -13,7 +13,12 @@ from project_agent.core.interfaces import Tool
 from project_agent.core.types import ToolResult
 from project_agent.errors import ConfigurationError
 from project_agent.runtime.permissions.types import ToolPermissionCategory
-from project_agent.runtime.sandbox import DirectSandboxRunner, SandboxMode, SandboxRunner
+from project_agent.runtime.sandbox import (
+    DirectSandboxRunner,
+    SandboxMode,
+    SandboxProcess,
+    SandboxRunner,
+)
 
 McpTransportType = Literal["stdio", "sse", "ws", "http", "streamable-http"]
 MAX_MCP_DESCRIPTION_LENGTH = 2048
@@ -159,9 +164,12 @@ class McpStdioClient:
         self._request_timeout_seconds = request_timeout_seconds
         self._workspace_root = workspace_root or Path.cwd()
         self._sandbox_runner = sandbox_runner or DirectSandboxRunner(mode=SandboxMode.FULL_ACCESS)
-        self._process: subprocess.Popen[str] | None = None
+        self._process: SandboxProcess | None = None
         self._next_id = 1
         self._lock = threading.Lock()
+        self._stderr_lock = threading.Lock()
+        self._stderr_buffer = ""
+        self._stderr_thread: threading.Thread | None = None
         self._initialized = False
 
     def list_tools(
@@ -253,6 +261,27 @@ class McpStdioClient:
             stderr=subprocess.PIPE,
             env=env,
         )
+        if self._process.stderr is not None:
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr,
+                args=(self._process.stderr,),
+                daemon=True,
+            )
+            self._stderr_thread.start()
+
+    def _drain_stderr(self, stderr: IO[str]) -> None:
+        while True:
+            line = stderr.readline()
+            if not line:
+                return
+            with self._stderr_lock:
+                self._stderr_buffer = (self._stderr_buffer + line)[-8192:]
+
+    def _stderr_message(self) -> str:
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(0.1)
+        with self._stderr_lock:
+            return self._stderr_buffer.strip()
 
     def _request(self, *, method: str, params: dict[str, object]) -> dict[str, object]:
         with self._lock:
@@ -272,7 +301,11 @@ class McpStdioClient:
             stdin.flush()
             line = self._readline_with_timeout(stdout)
             if not line:
-                raise RuntimeError(f"MCP server {self._server.name} closed stdout")
+                stderr = self._stderr_message()
+                message = f"MCP server {self._server.name} closed stdout"
+                if stderr:
+                    message += f": {stderr}"
+                raise RuntimeError(message)
             response = json.loads(line)
             if not isinstance(response, dict):
                 raise RuntimeError("MCP response must be an object")
@@ -303,7 +336,7 @@ class McpStdioClient:
             raise errors[0]
         return result[0] if result else ""
 
-    def _require_process(self) -> subprocess.Popen[str]:
+    def _require_process(self) -> SandboxProcess:
         if self._process is None:
             raise RuntimeError("MCP process is not running")
         return self._process
