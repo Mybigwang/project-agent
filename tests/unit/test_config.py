@@ -535,6 +535,40 @@ def test_load_settings_supports_sandbox_mode(
     assert settings.sandbox_mode == SandboxMode.FULL_ACCESS
 
 
+def test_load_settings_supports_mcp_specific_sandbox_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[project_agent]\nsandbox_mode = 'workspace_write'\nmcp_sandbox_mode = 'read_only'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROJECT_AGENT_MCP_SANDBOX_MODE", "full_access")
+
+    settings = load_settings(
+        config_path=config_path,
+        overrides={"mcp_sandbox_mode": "full_access"},
+    )
+
+    assert settings.sandbox_mode == SandboxMode.WORKSPACE_WRITE
+    assert settings.mcp_sandbox_mode == SandboxMode.FULL_ACCESS
+
+
+def test_load_settings_mcp_sandbox_mode_defaults_to_sandbox_mode(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[project_agent]\nsandbox_mode = 'read_only'\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(config_path=config_path)
+
+    assert settings.mcp_sandbox_mode == SandboxMode.READ_ONLY
+
+
 def test_load_settings_rejects_invalid_sandbox_mode(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(

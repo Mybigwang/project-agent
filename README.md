@@ -41,11 +41,21 @@ Supported environment variables:
 - `PROJECT_AGENT_PROMPT_CACHE` (`auto`, `on`, or `off`; default `auto`)
 - `PROJECT_AGENT_ENVIRONMENT`
 - `PROJECT_AGENT_SANDBOX_MODE` (`read_only`, `workspace_write`, or `full_access`)
+- `PROJECT_AGENT_MCP_SANDBOX_MODE` (defaults to `PROJECT_AGENT_SANDBOX_MODE`; use
+  `full_access` only for MCP servers that cannot run under the restricted token)
 
 Process-starting tools run through the configured sandbox mode. On Windows,
 `read_only` and `workspace_write` use a Job Object backend to contain the
 process tree and fail closed if the sandbox cannot be created. `full_access`
 runs directly and is intended for explicitly trusted local debugging.
+
+MCP stdio servers have a separate sandbox setting. For Node-based servers that
+cannot run under the restricted token, configure:
+
+```toml
+mcp_enabled = true
+mcp_sandbox_mode = "full_access"
+```
 
 For real model calls, configure any OpenAI-compatible chat completions endpoint:
 

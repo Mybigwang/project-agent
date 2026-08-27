@@ -75,6 +75,7 @@ LOG_LEVEL_OPTION = typer.Option(None, "--log-level")
 DEFAULT_MODEL_OPTION = typer.Option(None, "--default-model")
 ENVIRONMENT_OPTION = typer.Option(None, "--environment")
 SANDBOX_OPTION = typer.Option(None, "--sandbox")
+MCP_SANDBOX_OPTION = typer.Option(None, "--mcp-sandbox")
 CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x1b]")
 
 app = typer.Typer(help="Project Agent CLI.")
@@ -91,6 +92,7 @@ def main(
     default_model: str | None = DEFAULT_MODEL_OPTION,
     environment: str | None = ENVIRONMENT_OPTION,
     sandbox: str | None = SANDBOX_OPTION,
+    mcp_sandbox: str | None = MCP_SANDBOX_OPTION,
 ) -> None:
     overrides = {
         key: value
@@ -100,6 +102,7 @@ def main(
             "default_model": default_model,
             "environment": environment,
             "sandbox_mode": sandbox,
+            "mcp_sandbox_mode": mcp_sandbox,
         }.items()
         if value is not None
     }
@@ -119,6 +122,7 @@ def doctor(ctx: typer.Context) -> None:
     typer.echo(f"prompt_cache={settings.prompt_cache}")
     typer.echo(f"environment={settings.environment}")
     typer.echo(f"sandbox_mode={settings.sandbox_mode.value}")
+    typer.echo(f"mcp_sandbox_mode={settings.mcp_sandbox_mode.value}")
     typer.echo(f"memory_enabled={settings.memory_enabled}")
     typer.echo(f"memory_dir={settings.memory_dir}")
     typer.echo(f"multi_agent_enabled={settings.multi_agent_enabled}")
@@ -181,13 +185,14 @@ def run(
         ),
     ]
     if settings.mcp_enabled:
+        mcp_sandbox_runner = build_sandbox_runner(mode=settings.mcp_sandbox_mode)
         tools.extend(
             build_mcp_tools(
                 config_path=settings.mcp_config_file,
                 request_timeout_seconds=settings.mcp_request_timeout_seconds,
                 max_description_chars=settings.mcp_max_description_chars,
                 workspace_root=settings.workspace_root,
-                sandbox_runner=command_sandbox_runner,
+                sandbox_runner=mcp_sandbox_runner,
             )
         )
     repository_context_builder = RepositoryContextBuilder(

@@ -54,6 +54,7 @@ def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "permission_mode": PermissionMode.DEFAULT,
         "permission_rules_file": None,
         "sandbox_mode": SandboxMode.WORKSPACE_WRITE,
+        "mcp_sandbox_mode": SandboxMode.WORKSPACE_WRITE,
         "context_window_tokens": 200000,
         "context_trigger_fill_ratio": 0.87,
         "context_recover_fill_ratio": 0.82,
@@ -171,6 +172,43 @@ def test_run_command_appends_mcp_tools_when_enabled(
 
     assert result.exit_code == 0
     assert [tool.name for tool in captured["tools"]].count("echo") == 2
+
+
+def test_run_command_uses_mcp_specific_sandbox_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    settings = _make_settings(
+        tmp_path,
+        mcp_enabled=True,
+        mcp_sandbox_mode=SandboxMode.FULL_ACCESS,
+    )
+    runners: dict[SandboxMode, object] = {}
+
+    monkeypatch.setattr(cli_module, "load_settings", lambda **_: settings)
+
+    def fake_build_sandbox_runner(*, mode: SandboxMode) -> object:
+        runner = object()
+        runners[mode] = runner
+        return runner
+
+    monkeypatch.setattr(cli_module, "build_sandbox_runner", fake_build_sandbox_runner)
+
+    def fake_build_mcp_tools(**kwargs: object) -> list[object]:
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cli_module, "build_mcp_tools", fake_build_mcp_tools)
+    monkeypatch.setattr(cli_module, "_run_once", lambda **_: None)
+
+    result = runner.invoke(
+        app,
+        ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["sandbox_runner"] is runners[SandboxMode.FULL_ACCESS]
 
 
 def test_run_command_executes_runtime(tmp_path: Path) -> None:
