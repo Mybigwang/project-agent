@@ -352,6 +352,7 @@ class AgentRuntime:
                     existing_context_state=context_state,
                     context_manager=context_manager,
                     system_prefix_messages=system_prefix_messages,
+                    skill_catalog_enabled=skill_calls_used == 0,
                 )
             response = model_client.complete(
                 messages=model_messages,
@@ -381,10 +382,9 @@ class AgentRuntime:
                 )
 
             if isinstance(response, SkillCall):
-                messages, model_messages, trace = self._apply_skill_call(
+                messages, trace, skill_activated = self._apply_skill_call(
                     response=response,
                     messages=messages,
-                    model_messages=model_messages,
                     trace=trace,
                     step=step,
                     skill_calls_used=skill_calls_used,
@@ -392,8 +392,9 @@ class AgentRuntime:
                     skill_preprocessor=skill_preprocessor,
                     notification_callback=notification_callback,
                     permission_policy=permission_policy,
-                    approval_callback=approval_callback,
                 )
+                if skill_activated:
+                    skill_calls_used += 1
                 model_messages, context_state = self._build_model_messages(
                     history=history,
                     messages=messages,
@@ -407,8 +408,8 @@ class AgentRuntime:
                     existing_context_state=context_state,
                     context_manager=context_manager,
                     system_prefix_messages=system_prefix_messages,
+                    skill_catalog_enabled=skill_calls_used == 0,
                 )
-                skill_calls_used += 1
                 continue
 
             executed_tool_calls, tool_results, tool_messages = self._run_tool_calls(
@@ -448,6 +449,7 @@ class AgentRuntime:
                 existing_context_state=context_state,
                 context_manager=context_manager,
                 system_prefix_messages=system_prefix_messages,
+                skill_catalog_enabled=skill_calls_used == 0,
             )
             trace = trace + tuple(
                 AgentTraceStep(
@@ -650,6 +652,7 @@ class AgentRuntime:
                     context_manager=context_manager,
                     prefix_messages=(task_context_message,),
                     system_prefix_messages=system_prefix_messages,
+                    skill_catalog_enabled=skill_calls_used == 0,
                 )
             response = model_client.complete(
                 messages=model_messages,
@@ -676,10 +679,9 @@ class AgentRuntime:
                 )
 
             if isinstance(response, SkillCall):
-                messages, model_messages, trace = self._apply_skill_call(
+                messages, trace, skill_activated = self._apply_skill_call(
                     response=response,
                     messages=messages,
-                    model_messages=model_messages,
                     trace=trace,
                     step=step,
                     skill_calls_used=skill_calls_used,
@@ -687,9 +689,10 @@ class AgentRuntime:
                     skill_preprocessor=skill_preprocessor,
                     notification_callback=notification_callback,
                     permission_policy=permission_policy,
-                    approval_callback=approval_callback,
                     task_id=task.id,
                 )
+                if skill_activated:
+                    skill_calls_used += 1
                 model_messages, context_state = self._build_model_messages(
                     history=history,
                     messages=messages,
@@ -704,10 +707,10 @@ class AgentRuntime:
                     context_manager=context_manager,
                     prefix_messages=(task_context_message,),
                     system_prefix_messages=system_prefix_messages,
+                    skill_catalog_enabled=skill_calls_used == 0,
                 )
                 step += 1
                 task_step += 1
-                skill_calls_used += 1
                 continue
 
             executed_tool_calls, tool_results, tool_messages = self._run_tool_calls(
@@ -748,6 +751,7 @@ class AgentRuntime:
                 context_manager=context_manager,
                 prefix_messages=(task_context_message,),
                 system_prefix_messages=system_prefix_messages,
+                skill_catalog_enabled=skill_calls_used == 0,
             )
             trace = trace + tuple(
                 AgentTraceStep(
@@ -841,6 +845,7 @@ class AgentRuntime:
         context_manager: ContextManagerProtocol | None,
         prefix_messages: tuple[Message, ...] = (),
         system_prefix_messages: tuple[Message, ...] = (),
+        skill_catalog_enabled: bool = True,
     ) -> tuple[tuple[Message, ...], ContextManagementState | None]:
         system_messages: tuple[Message, ...] = tuple(system_prefix_messages)
         if enable_repository_context and repository_context_builder is not None:
@@ -859,7 +864,14 @@ class AgentRuntime:
                 *system_messages,
                 Message(role="system", content=memory_context.prompt),
             )
-        skill_catalog_message = self._build_skill_catalog_message(skill_registry)
+        # Once a skill has been activated this turn, stop advertising the
+        # skill-selection JSON protocol so the model answers instead of
+        # selecting another skill.
+        skill_catalog_message = (
+            self._build_skill_catalog_message(skill_registry)
+            if skill_catalog_enabled
+            else None
+        )
         if skill_catalog_message is not None:
             system_messages = (*system_messages, skill_catalog_message)
         model_messages = (*prefix_messages, *system_messages, *messages)
@@ -900,7 +912,6 @@ class AgentRuntime:
         *,
         response: SkillCall,
         messages: tuple[Message, ...],
-        model_messages: tuple[Message, ...],
         trace: tuple[AgentTraceStep, ...],
         step: int,
         skill_calls_used: int,
@@ -908,44 +919,98 @@ class AgentRuntime:
         skill_preprocessor: SkillPromptPreprocessor | None,
         notification_callback: NotificationCallback | None,
         permission_policy: PermissionPolicyProtocol | None,
-        approval_callback: ApprovalCallback | None,
         task_id: str | None = None,
-    ) -> tuple[tuple[Message, ...], tuple[Message, ...], tuple[AgentTraceStep, ...]]:
-        if skill_calls_used >= MAX_SKILL_CALLS_PER_TURN:
-            raise AgentError("model selected too many skills in one turn")
-        if skill_registry is None or skill_preprocessor is None:
-            raise AgentError("model selected a skill but skills are not configured")
-        if permission_policy is not None and permission_policy.mode.value == "plan":
-            raise AgentError("model selected a skill that is not allowed in plan mode")
-        skill = skill_registry.get(response.name)
-        if skill is None:
-            raise AgentError(f"model selected unknown skill: {response.name}")
-        if not skill.metadata.model_selectable:
-            raise AgentError(f"model selected non-selectable skill: {response.name}")
-        try:
-            invocation = build_skill_invocation(
-                command_name=response.name, raw_args=response.raw_args
-            )
-            expanded = skill_preprocessor.expand_invocation_body(invocation)
-        except SkillError as error:
-            raise AgentError(str(error)) from error
-        if notification_callback is not None:
-            notification_callback(f"正在调用 skill: {response.name}")
-        skill_message = Message(
-            role="system",
-            content=f"Activated skill: {response.name}\n\n{expanded}",
+    ) -> tuple[tuple[Message, ...], tuple[AgentTraceStep, ...], bool]:
+        # The model picked a skill by emitting JSON content. Echo that choice
+        # back as an assistant message so the model sees its own selection,
+        # then reply with a result message, mirroring tool call / tool result.
+        echo_message = Message(
+            role="assistant",
+            content=json.dumps(
+                {"skill": {"name": response.name, "arguments": response.raw_args}},
+                ensure_ascii=False,
+            ),
         )
-        updated_messages = messages + (skill_message,)
-        updated_model_messages = model_messages + (skill_message,)
+
+        rejection_reason: str | None = None
+        expanded: str | None = None
+        if skill_calls_used >= MAX_SKILL_CALLS_PER_TURN:
+            rejection_reason = (
+                "a skill has already been activated for this turn; follow its "
+                "instructions and answer directly instead of selecting another skill"
+            )
+        elif skill_registry is None or skill_preprocessor is None:
+            rejection_reason = "skills are not configured; answer directly"
+        elif permission_policy is not None and permission_policy.mode.value == "plan":
+            rejection_reason = (
+                "skill selection is not allowed in plan mode; respond without "
+                "selecting a skill"
+            )
+        else:
+            skill = skill_registry.get(response.name)
+            if skill is None:
+                available = ", ".join(
+                    entry.name for entry in skill_registry.catalog_entries()
+                )
+                rejection_reason = (
+                    f"unknown skill '{response.name}'; model-selectable skills: "
+                    f"{available or '(none)'}"
+                )
+            elif not skill.metadata.model_selectable:
+                rejection_reason = (
+                    f"skill '{response.name}' cannot be selected by the model; "
+                    "choose a model-selectable skill or answer directly"
+                )
+            else:
+                try:
+                    invocation = build_skill_invocation(
+                        command_name=response.name, raw_args=response.raw_args
+                    )
+                    expanded = skill_preprocessor.expand_invocation_body(invocation)
+                except SkillError as error:
+                    rejection_reason = (
+                        f"skill '{response.name}' failed to expand: {error}"
+                    )
+
+        if expanded is not None:
+            if notification_callback is not None:
+                notification_callback(f"正在调用 skill: {response.name}")
+            result_message = Message(
+                role="user",
+                content=(
+                    f"Skill '{response.name}' is now active. Follow the "
+                    "instructions below to handle the request, and do not output "
+                    "the skill-selection JSON again this turn.\n\n"
+                    f"{expanded}"
+                ),
+            )
+            updated_trace = trace + (
+                AgentTraceStep(
+                    step=step,
+                    event="skill",
+                    summary=f"activated {response.name}",
+                    task_id=task_id,
+                ),
+            )
+            return messages + (echo_message, result_message), updated_trace, True
+
+        feedback_message = Message(
+            role="user",
+            content=(
+                f"Your skill selection for '{response.name}' was rejected: "
+                f"{rejection_reason}."
+            ),
+        )
         updated_trace = trace + (
             AgentTraceStep(
                 step=step,
                 event="skill",
-                summary=f"activated {response.name}",
+                summary=f"rejected {response.name}: {rejection_reason}",
+                is_error=True,
                 task_id=task_id,
             ),
         )
-        return updated_messages, updated_model_messages, updated_trace
+        return messages + (echo_message, feedback_message), updated_trace, False
 
     def _maybe_repair_tool_error(
         self,

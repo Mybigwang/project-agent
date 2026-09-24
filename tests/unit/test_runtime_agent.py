@@ -227,43 +227,61 @@ class SkillCallCapturingModelClient:
 class RepeatedSkillCallModelClient:
     name = "repeated-skill-call-model"
 
+    def __init__(self) -> None:
+        self.calls: tuple[tuple[Message, ...], ...] = ()
+
     def complete(
         self,
         *,
         messages: Sequence[Message],
         tools: Sequence[object],
         stream_callback: object | None = None,
-    ) -> SkillCall:
-        del messages, tools, stream_callback
-        return SkillCall(name="review-change", raw_args="src/module.py")
+    ) -> Message | SkillCall:
+        del tools, stream_callback
+        self.calls = (*self.calls, tuple(messages))
+        if len(self.calls) <= 2:
+            return SkillCall(name="review-change", raw_args="src/module.py")
+        return Message(role="assistant", content="done")
 
 
 class UnknownSkillCallModelClient:
     name = "unknown-skill-call-model"
 
+    def __init__(self) -> None:
+        self._calls = 0
+
     def complete(
         self,
         *,
         messages: Sequence[Message],
         tools: Sequence[object],
         stream_callback: object | None = None,
-    ) -> SkillCall:
+    ) -> Message | SkillCall:
         del messages, tools, stream_callback
-        return SkillCall(name="missing-skill")
+        self._calls += 1
+        if self._calls == 1:
+            return SkillCall(name="missing-skill")
+        return Message(role="assistant", content="recovered")
 
 
 class NonSelectableSkillCallModelClient:
     name = "non-selectable-skill-call-model"
 
+    def __init__(self) -> None:
+        self._calls = 0
+
     def complete(
         self,
         *,
         messages: Sequence[Message],
         tools: Sequence[object],
         stream_callback: object | None = None,
-    ) -> SkillCall:
+    ) -> Message | SkillCall:
         del messages, tools, stream_callback
-        return SkillCall(name="internal-review")
+        self._calls += 1
+        if self._calls == 1:
+            return SkillCall(name="internal-review")
+        return Message(role="assistant", content="recovered")
 
 
 class StaticRepositoryContextBuilder:
@@ -1298,18 +1316,30 @@ def test_agent_runtime_applies_model_selected_skill_and_continues(
     assert result.final_message.content == "done"
     assert [step.event for step in result.trace] == ["skill", "assistant"]
     assert any(
-        message.content.startswith("Activated skill: review-change")
+        message.role == "assistant" and message.content.startswith('{"skill"')
+        for message in result.messages
+    )
+    assert any(
+        message.role == "user"
+        and message.content.startswith("Skill 'review-change' is now active")
+        and "Review target src/module.py" in message.content
         for message in result.messages
     )
     assert len(model_client.calls) == 2
     assert len(context_manager.received_messages) == 2
     assert any(
-        message.role == "system" and "Review target src/module.py" in message.content
+        message.role == "user" and "Review target src/module.py" in message.content
         for message in model_client.calls[1]
     )
     assert any(
-        message.role == "system"
-        and message.content.startswith("Activated skill: review-change")
+        "Available skills" in message.content for message in model_client.calls[0]
+    )
+    assert not any(
+        "Available skills" in message.content for message in model_client.calls[1]
+    )
+    assert any(
+        message.role == "user"
+        and message.content.startswith("Skill 'review-change' is now active")
         for message in context_manager.received_messages[1]
     )
 
@@ -1354,7 +1384,7 @@ def test_agent_runtime_emits_notification_for_model_selected_skill(
     assert notifications == ["正在调用 skill: review-change"]
 
 
-def test_agent_runtime_rejects_unknown_model_selected_skill(
+def test_agent_runtime_feeds_back_unknown_model_selected_skill(
     runtime: AgentRuntime,
     store: InMemorySessionStore,
     tmp_path: Path,
@@ -1362,21 +1392,33 @@ def test_agent_runtime_rejects_unknown_model_selected_skill(
     registry = SkillRegistry(())
     preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
 
-    with pytest.raises(AgentError, match="unknown skill"):
-        runtime.run_turn(
-            session_id="session-1",
-            user_input="please review the change",
-            model_client=UnknownSkillCallModelClient(),
-            tools=[EchoTool()],
-            session_store=store,
-            workspace_root=tmp_path,
-            max_steps=3,
-            skill_registry=registry,
-            skill_preprocessor=preprocessor,
-        )
+    result = runtime.run_turn(
+        session_id="session-1",
+        user_input="please review the change",
+        model_client=UnknownSkillCallModelClient(),
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        skill_registry=registry,
+        skill_preprocessor=preprocessor,
+    )
+
+    assert result.final_message.content == "recovered"
+    feedback_messages = [
+        message
+        for message in result.messages
+        if message.role == "user" and "was rejected" in message.content
+    ]
+    assert len(feedback_messages) == 1
+    assert "unknown skill 'missing-skill'" in feedback_messages[0].content
+    assert any(
+        message.role == "assistant" and message.content.startswith('{"skill"')
+        for message in result.messages
+    )
 
 
-def test_agent_runtime_rejects_non_selectable_model_selected_skill(
+def test_agent_runtime_feeds_back_non_selectable_model_selected_skill(
     runtime: AgentRuntime,
     store: InMemorySessionStore,
     tmp_path: Path,
@@ -1399,21 +1441,29 @@ def test_agent_runtime_rejects_non_selectable_model_selected_skill(
     )
     preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
 
-    with pytest.raises(AgentError, match="non-selectable"):
-        runtime.run_turn(
-            session_id="session-1",
-            user_input="please review the change",
-            model_client=NonSelectableSkillCallModelClient(),
-            tools=[EchoTool()],
-            session_store=store,
-            workspace_root=tmp_path,
-            max_steps=3,
-            skill_registry=registry,
-            skill_preprocessor=preprocessor,
-        )
+    result = runtime.run_turn(
+        session_id="session-1",
+        user_input="please review the change",
+        model_client=NonSelectableSkillCallModelClient(),
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=3,
+        skill_registry=registry,
+        skill_preprocessor=preprocessor,
+    )
+
+    assert result.final_message.content == "recovered"
+    feedback_messages = [
+        message
+        for message in result.messages
+        if message.role == "user" and "was rejected" in message.content
+    ]
+    assert len(feedback_messages) == 1
+    assert "cannot be selected by the model" in feedback_messages[0].content
 
 
-def test_agent_runtime_rejects_repeated_skill_selection_in_one_turn(
+def test_agent_runtime_feeds_back_repeated_skill_selection_in_one_turn(
     runtime: AgentRuntime,
     store: InMemorySessionStore,
     tmp_path: Path,
@@ -1431,19 +1481,39 @@ def test_agent_runtime_rejects_repeated_skill_selection_in_one_turn(
         load_skills(builtin_root=None, user_root=None, project_root=project_root)
     )
     preprocessor = _make_preprocessor(registry=registry, workspace_root=tmp_path)
+    model_client = RepeatedSkillCallModelClient()
+    notifications: list[str] = []
 
-    with pytest.raises(AgentError, match="too many skills"):
-        runtime.run_turn(
-            session_id="session-1",
-            user_input="please review the change",
-            model_client=RepeatedSkillCallModelClient(),
-            tools=[EchoTool()],
-            session_store=store,
-            workspace_root=tmp_path,
-            max_steps=3,
-            skill_registry=registry,
-            skill_preprocessor=preprocessor,
-        )
+    result = runtime.run_turn(
+        session_id="session-1",
+        user_input="please review the change",
+        model_client=model_client,
+        tools=[EchoTool()],
+        session_store=store,
+        workspace_root=tmp_path,
+        max_steps=4,
+        notification_callback=notifications.append,
+        skill_registry=registry,
+        skill_preprocessor=preprocessor,
+    )
+
+    assert result.final_message.content == "done"
+    assert [step.event for step in result.trace] == ["skill", "skill", "assistant"]
+    assert [step.is_error for step in result.trace] == [False, True, False]
+    feedback_messages = [
+        message
+        for message in result.messages
+        if message.role == "user" and "was rejected" in message.content
+    ]
+    assert len(feedback_messages) == 1
+    assert "already been activated" in feedback_messages[0].content
+    assert notifications == ["正在调用 skill: review-change"]
+    assert not any(
+        "Available skills" in message.content for message in model_client.calls[1]
+    )
+    assert not any(
+        "Available skills" in message.content for message in model_client.calls[2]
+    )
 
 
 def test_agent_runtime_denies_tool_call_when_permission_policy_blocks_it(
