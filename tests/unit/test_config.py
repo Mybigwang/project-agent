@@ -80,9 +80,10 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.context_command_timeout_seconds == 5.0
     assert settings.skills_enabled is True
     assert settings.skills_builtin_enabled is True
-    assert settings.project_skills_dir == (
-        settings.workspace_root / ".project_agent" / "skills"
-    ).resolve()
+    assert (
+        settings.project_skills_dir
+        == (settings.workspace_root / ".project_agent" / "skills").resolve()
+    )
     assert settings.user_skills_dir is None
     assert settings.skills_allow_command_substitution is False
     assert settings.skills_max_composition_depth == 3
@@ -116,9 +117,10 @@ def test_load_settings_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.max_worker_result_chars == 8000
     assert settings.multi_agent_strict_task_specs is True
     assert settings.mcp_enabled is False
-    assert settings.mcp_config_file == (
-        settings.workspace_root / ".project_agent" / "mcp-servers.json"
-    ).resolve()
+    assert (
+        settings.mcp_config_file
+        == (settings.workspace_root / ".project_agent" / "mcp-servers.json").resolve()
+    )
     assert settings.mcp_request_timeout_seconds == 30.0
     assert settings.mcp_max_description_chars == 2048
 
@@ -301,9 +303,9 @@ def test_load_settings_honors_mcp_overrides(
     )
 
     assert settings.mcp_enabled is False
-    assert settings.mcp_config_file == (
-        workspace_root / ".project_agent" / "cli-mcp.json"
-    ).resolve()
+    assert (
+        settings.mcp_config_file == (workspace_root / ".project_agent" / "cli-mcp.json").resolve()
+    )
     assert settings.mcp_request_timeout_seconds == 25.0
     assert settings.mcp_max_description_chars == 1800
 
@@ -827,3 +829,41 @@ def test_load_settings_rejects_memory_dir_outside_workspace(tmp_path: Path) -> N
 
     with pytest.raises(ConfigurationError, match="memory_dir must be within workspace_root"):
         load_settings(config_path=config_path)
+
+
+def test_memory_lifecycle_settings_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "memory.toml"
+    config.write_text(
+        "[project_agent]\nmemory_max_unused_days = 60\nmemory_use_enabled = false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROJECT_AGENT_MEMORY_MAX_UNUSED_DAYS", "45")
+    settings = load_settings(
+        config_path=config,
+        overrides={
+            "workspace_root": str(tmp_path),
+            "memory_max_unused_days": "20",
+            "memory_generate_enabled": "false",
+        },
+    )
+    assert settings.memory_max_unused_days == 20
+    assert settings.memory_use_enabled is False
+    assert settings.memory_generate_enabled is False
+    assert settings.memory_idle_minutes == 30
+    assert settings.memory_max_sessions_per_pass == 5
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "memory_idle_minutes",
+        "memory_max_sessions_per_pass",
+        "memory_max_unused_days",
+        "memory_prompt_max_chars",
+    ],
+)
+def test_memory_lifecycle_rejects_zero_limits(name: str) -> None:
+    with pytest.raises(ConfigurationError, match=name):
+        load_settings(overrides={name: "0"})

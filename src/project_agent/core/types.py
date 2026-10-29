@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -245,6 +246,9 @@ class MemoryFile:
 class MemoryContext:
     prompt: str
     relevant_files: tuple[MemoryFile, ...]
+    on_recalled: Callable[[Sequence[Message]], None] | None = field(
+        default=None, compare=False, repr=False
+    )
 
 
 @dataclass(frozen=True)

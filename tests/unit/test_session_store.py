@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,76 @@ def test_file_session_store_returns_empty_state_for_new_session(tmp_path: Path) 
     store = FileSessionStore(tmp_path)
 
     assert store.load("session-1") == SessionState(messages=(), task_plan=None)
+
+
+def test_memory_snapshot_reads_only_conversation_inputs(tmp_path: Path) -> None:
+    path = tmp_path / "session-1.json"
+    path.write_text(
+        json.dumps(
+            {
+                "messages": [{"role": "user", "content": "Use UTC."}],
+                "memory_generation_enabled": False,
+                "agent_runs": [{"role": "invalid"}],
+                "task_plan": "invalid",
+                "context_state": "invalid",
+            }
+        ),
+        encoding="utf-8",
+    )
+    snapshot = FileSessionStore(tmp_path).memory_snapshot("session-1")
+    assert snapshot.messages == (Message(role="user", content="Use UTC."),)
+    assert snapshot.revision == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert snapshot.updated_at == path.stat().st_mtime
+    assert not snapshot.generation_enabled
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["{broken", "[]", "{}", '{"messages": {}}', '{"messages": [{"role": "user"}]}'],
+)
+def test_memory_snapshot_rejects_invalid_conversation(tmp_path: Path, payload: str) -> None:
+    (tmp_path / "session-1.json").write_text(payload, encoding="utf-8")
+    with pytest.raises(SessionError, match="failed to read memory input"):
+        FileSessionStore(tmp_path).memory_snapshot("session-1")
+
+
+def test_activity_lock_handles_directory_creation_during_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / ".project_agent" / "sessions"
+    store = FileSessionStore(root)
+    original_path_for = store._path_for
+
+    def create_directory_after_resolution(session_id: str) -> Path:
+        path = original_path_for(session_id)
+        # Simulate background initialization between the two path resolutions.
+        root.mkdir(parents=True, exist_ok=True)
+        return path
+
+    monkeypatch.setattr(store, "_path_for", create_directory_after_resolution)
+    with store.activity("session-1"):
+        store.save("session-1", SessionState())
+    assert store.load("session-1") == SessionState()
+
+
+def test_activity_lock_rejects_symlink_outside_session_directory(tmp_path: Path) -> None:
+    root = tmp_path / "sessions"
+    root.mkdir()
+    outside = tmp_path / "outside.lock"
+    outside.touch()
+    try:
+        (root / "session-1.lock").symlink_to(outside)
+    except OSError:
+        pytest.skip("creating symlinks requires privileges on this platform")
+    with pytest.raises(SessionError, match="session lock escapes"):
+        FileSessionStore(root).activity_path("session-1")
+
+
+@pytest.mark.parametrize("payload", ["{broken", "[]"])
+def test_save_rejects_corrupt_existing_session(tmp_path: Path, payload: str) -> None:
+    (tmp_path / "session-1.json").write_text(payload, encoding="utf-8")
+    with pytest.raises(SessionError, match="failed to save session"):
+        FileSessionStore(tmp_path).save("session-1", SessionState())
 
 
 def test_file_session_store_persists_session_state(tmp_path: Path) -> None:
@@ -120,11 +192,31 @@ def test_file_session_store_persists_agent_runs(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "payload",
     [
-        '{"messages": [], "agent_runs": [{"agent_id": "", "session_id": "s", "name": "a", "description": "d", "kind": "worker", "status": "completed", "role": "worker", "readonly": false, "depth": 1}]}',
-        '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", "name": "a", "description": "d", "kind": "invalid", "status": "completed", "role": "worker", "readonly": false, "depth": 1}]}',
-        '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", "name": "a", "description": "d", "kind": "worker", "status": "invalid", "role": "worker", "readonly": false, "depth": 1}]}',
-        '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", "name": "a", "description": "d", "kind": "worker", "status": "completed", "role": "invalid", "readonly": false, "depth": 1}]}',
-        '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", "name": "a", "description": "d", "kind": "worker", "status": "completed", "role": "worker", "readonly": false, "verdict": "MAYBE", "depth": 1}]}',
+        (
+            '{"messages": [], "agent_runs": [{"agent_id": "", "session_id": "s", '
+            '"name": "a", "description": "d", "kind": "worker", "status": "completed", '
+            '"role": "worker", "readonly": false, "depth": 1}]}'
+        ),
+        (
+            '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", '
+            '"name": "a", "description": "d", "kind": "invalid", "status": "completed", '
+            '"role": "worker", "readonly": false, "depth": 1}]}'
+        ),
+        (
+            '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", '
+            '"name": "a", "description": "d", "kind": "worker", "status": "invalid", '
+            '"role": "worker", "readonly": false, "depth": 1}]}'
+        ),
+        (
+            '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", '
+            '"name": "a", "description": "d", "kind": "worker", "status": "completed", '
+            '"role": "invalid", "readonly": false, "depth": 1}]}'
+        ),
+        (
+            '{"messages": [], "agent_runs": [{"agent_id": "a", "session_id": "s", '
+            '"name": "a", "description": "d", "kind": "worker", "status": "completed", '
+            '"role": "worker", "readonly": false, "verdict": "MAYBE", "depth": 1}]}'
+        ),
     ],
 )
 def test_file_session_store_rejects_invalid_agent_runs(
@@ -265,7 +357,9 @@ def test_file_session_store_rejects_invalid_task_plan_schema(
 def test_file_session_store_loads_legacy_session_without_context_state(tmp_path: Path) -> None:
     store = FileSessionStore(tmp_path)
     path = tmp_path / "session-1.json"
-    path.write_text('{"messages": [{"role": "user", "content": "hello"}], "task_plan": null}', encoding="utf-8")
+    path.write_text(
+        '{"messages": [{"role": "user", "content": "hello"}], "task_plan": null}', encoding="utf-8"
+    )
 
     state = store.load("session-1")
 

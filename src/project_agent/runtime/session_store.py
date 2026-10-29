@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from dataclasses import asdict
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from project_agent.core.types import (
@@ -19,12 +22,15 @@ from project_agent.core.types import (
     ToolCall,
 )
 from project_agent.errors import SessionError
+from project_agent.runtime.persistence import atomic_write, file_lock
 
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 MESSAGE_ROLES = frozenset({"system", "user", "assistant", "tool"})
 TASK_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked"})
 AGENT_KINDS = frozenset({"subagent", "worker", "coordinator"})
-AGENT_ROLES = frozenset({"explore", "plan", "worker", "verification", "coordinator", "generalPurpose"})
+AGENT_ROLES = frozenset(
+    {"explore", "plan", "worker", "verification", "coordinator", "generalPurpose"}
+)
 AGENT_RUN_STATUSES = frozenset({"created", "running", "completed", "failed", "cancelled"})
 AGENT_VERDICTS = frozenset({"PASS", "FAIL", "PARTIAL"})
 MAX_TASKS_PER_PLAN = 50
@@ -32,6 +38,14 @@ MAX_TASK_FIELD_CHARS = 2000
 MAX_TASK_DEPENDENCIES = 20
 MAX_AGENT_RUNS_PER_SESSION = 100
 MAX_AGENT_FIELD_CHARS = 2000
+
+
+@dataclass(frozen=True)
+class MemorySessionSnapshot:
+    messages: tuple[Message, ...]
+    revision: str
+    updated_at: float
+    generation_enabled: bool
 
 
 class InMemorySessionStore:
@@ -44,10 +58,14 @@ class InMemorySessionStore:
     def save(self, session_id: str, state: SessionState) -> None:
         self._states = {**self._states, session_id: state}
 
+    def activity(self, session_id: str) -> AbstractContextManager[None]:
+        return nullcontext()
+
 
 class FileSessionStore:
-    def __init__(self, root_dir: Path) -> None:
+    def __init__(self, root_dir: Path, *, memory_generation_enabled: bool = True) -> None:
         self._root_dir = root_dir
+        self._memory_generation_enabled = memory_generation_enabled
 
     def load(self, session_id: str) -> SessionState:
         path = self._path_for(session_id)
@@ -64,10 +82,56 @@ class FileSessionStore:
         path = self._path_for(session_id)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            payload = json.dumps(_serialize_session_state(state), ensure_ascii=False, indent=2)
-            path.write_text(payload, encoding="utf-8")
-        except OSError as error:
+            serialized = _serialize_session_state(state)
+            previous = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            if not isinstance(previous, dict):
+                raise ValueError("session state must be an object")
+            # Opting a session out remains effective if generation is later enabled globally.
+            serialized["memory_generation_enabled"] = (
+                self._memory_generation_enabled and previous.get("memory_generation_enabled", True)
+            )
+            payload = json.dumps(serialized, ensure_ascii=False, indent=2)
+            if not path.exists() or path.read_text(encoding="utf-8") != payload:
+                atomic_write(path, payload)
+        except (OSError, ValueError, TypeError) as error:
             raise SessionError(f"failed to save session: {session_id}") from error
+
+    def session_ids(self) -> tuple[str, ...]:
+        return tuple(path.stem for path in sorted(self._root_dir.glob("*.json")))
+
+    def memory_snapshot(self, session_id: str) -> MemorySessionSnapshot:
+        """Read memory inputs without restoring unrelated agent execution state."""
+        path = self._path_for(session_id)
+        try:
+            raw = path.read_bytes()
+            payload = json.loads(raw)
+            if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
+                raise ValueError("memory input must contain a messages list")
+            return MemorySessionSnapshot(
+                messages=tuple(_deserialize_message(item) for item in payload["messages"]),
+                revision=hashlib.sha256(raw).hexdigest(),
+                updated_at=path.stat().st_mtime,
+                generation_enabled=payload.get("memory_generation_enabled", True) is True,
+            )
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            raise SessionError(f"failed to read memory input: {session_id}") from error
+
+    def activity_path(self, session_id: str) -> Path:
+        # Resolve against an existing directory: on Windows, concurrent creation can
+        # otherwise change resolve() between extended (\\?\) and ordinary paths.
+        self._root_dir.mkdir(parents=True, exist_ok=True)
+        path = self._path_for(session_id)
+        lock_path = path.with_suffix(".lock").resolve()
+        if not lock_path.is_relative_to(self._root_dir.resolve()):
+            raise SessionError("session lock escapes session directory")
+        return lock_path
+
+    @contextmanager
+    def activity(self, session_id: str) -> Iterator[None]:
+        with file_lock(self.activity_path(session_id)) as acquired:
+            if not acquired:
+                raise SessionError(f"session is already active: {session_id}")
+            yield
 
     def _path_for(self, session_id: str) -> Path:
         if not SESSION_ID_PATTERN.fullmatch(session_id):
@@ -162,7 +226,9 @@ def _serialize_agent_run_record(record: AgentRunRecord) -> dict[str, object]:
     }
 
 
-def _serialize_agent_structured_result(result: AgentStructuredResult | None) -> dict[str, object] | None:
+def _serialize_agent_structured_result(
+    result: AgentStructuredResult | None,
+) -> dict[str, object] | None:
     if result is None:
         return None
     return {

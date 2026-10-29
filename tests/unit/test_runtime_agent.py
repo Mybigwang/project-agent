@@ -99,11 +99,7 @@ class ToolCallCapturingModelClient:
         del tools, stream_callback
         self.calls = (*self.calls, tuple(messages))
         if len(self.calls) == 1:
-            return (
-                ToolCall(
-                    name="echo", arguments={"content": "ping"}, call_id="call_123"
-                ),
-            )
+            return (ToolCall(name="echo", arguments={"content": "ping"}, call_id="call_123"),)
         return Message(role="assistant", content="done")
 
 
@@ -129,9 +125,7 @@ class MultiToolCallCapturingModelClient:
         if len(self.calls) == 1:
             return (
                 ToolCall(name="echo", arguments={"content": "first"}, call_id="call_1"),
-                ToolCall(
-                    name="echo", arguments={"content": "second"}, call_id="call_2"
-                ),
+                ToolCall(name="echo", arguments={"content": "second"}, call_id="call_2"),
             )
         return Message(role="assistant", content="done")
 
@@ -184,9 +178,7 @@ class RepeatingBoomModelClient:
 class RecordingRepairer:
     def __init__(self, result: ToolResult | None) -> None:
         self.result = result
-        self.calls: tuple[
-            tuple[str, tuple[Message, ...], ToolCall, ToolResult, Path], ...
-        ] = ()
+        self.calls: tuple[tuple[str, tuple[Message, ...], ToolCall, ToolResult, Path], ...] = ()
 
     def attempt_repair(
         self,
@@ -309,28 +301,26 @@ class EmptyRepositoryContextBuilder:
         user_input: str,
         history: Sequence[Message],
     ) -> RepositoryContext:
-        return RepositoryContext(
-            rendered="", workspace=None, git=None, rules=(), relevant_files=()
-        )
+        return RepositoryContext(rendered="", workspace=None, git=None, rules=(), relevant_files=())
 
 
 class StaticMemoryContextBuilder:
     def __init__(self) -> None:
         self.calls = 0
 
-    def build(self, *, user_input: str) -> MemoryContext:
+    def build(self, *, user_input: str, history: Sequence[Message] = ()) -> MemoryContext:
         self.calls += 1
         return MemoryContext(prompt=f"memory for {user_input}", relevant_files=())
 
 
 class FailingMemoryContextBuilder:
-    def build(self, *, user_input: str) -> MemoryContext:
+    def build(self, *, user_input: str, history: Sequence[Message] = ()) -> MemoryContext:
         del user_input
         raise AgentError("memory recall failed")
 
 
 class OSErrorMemoryContextBuilder:
-    def build(self, *, user_input: str) -> MemoryContext:
+    def build(self, *, user_input: str, history: Sequence[Message] = ()) -> MemoryContext:
         del user_input
         raise OSError("memory directory unavailable")
 
@@ -448,9 +438,7 @@ def test_agent_runtime_preserves_tool_call_id_for_follow_up_request(
     assert second_call_messages[-2] == Message(
         role="assistant",
         content="",
-        tool_calls=(
-            ToolCall(name="echo", arguments={"content": "ping"}, call_id="call_123"),
-        ),
+        tool_calls=(ToolCall(name="echo", arguments={"content": "ping"}, call_id="call_123"),),
     )
     assert second_call_messages[-1] == Message(
         role="tool",
@@ -576,7 +564,10 @@ def test_agent_runtime_wraps_tool_exception(
         max_steps=3,
     )
 
-    assert result.final_message.content == "Tool result (turn 1): tool execution failed; inspect data.message"
+    assert (
+        result.final_message.content
+        == "Tool result (turn 1): tool execution failed; inspect data.message"
+    )
     assert result.trace[0].is_error is True
     tool_message = result.messages[-2]
     assert tool_message.role == "tool"
@@ -765,9 +756,7 @@ def test_agent_runtime_injects_memory_context(
 
     assert result.memory_context is not None
     assert result.memory_context.prompt == "memory for hello"
-    assert model_client.messages[0] == Message(
-        role="system", content="memory for hello"
-    )
+    assert model_client.messages[0] == Message(role="system", content="memory for hello")
 
 
 def test_agent_runtime_continues_when_memory_context_build_fails(
@@ -790,7 +779,6 @@ def test_agent_runtime_continues_when_memory_context_build_fails(
     assert result.memory_context is None
 
 
-
 def test_agent_runtime_continues_when_memory_context_build_raises_os_error(
     runtime: AgentRuntime,
     store: InMemorySessionStore,
@@ -809,7 +797,6 @@ def test_agent_runtime_continues_when_memory_context_build_raises_os_error(
 
     assert result.final_message.content == "Mock response (turn 1): hello"
     assert result.memory_context is None
-
 
 
 def test_agent_runtime_orders_repository_memory_and_skill_system_messages(
@@ -1027,15 +1014,11 @@ def test_agent_runtime_propagates_context_state_across_planned_tasks(
     assert context_manager.received_states[0] is None
     assert context_manager.received_states[1] is not None
     assert context_manager.received_states[1].turn_count == 1
-    assert context_manager.received_messages[0][0].content.startswith(
-        "Execute the current task."
-    )
+    assert context_manager.received_messages[0][0].content.startswith("Execute the current task.")
     assert context_manager.received_messages[0][1] == Message(
         role="system", content="memory for hello"
     )
-    assert context_manager.received_messages[1][0].content.startswith(
-        "Execute the current task."
-    )
+    assert context_manager.received_messages[1][0].content.startswith("Execute the current task.")
     assert context_manager.received_messages[1][1] == Message(
         role="system", content="memory for hello"
     )
@@ -1088,9 +1071,7 @@ class SequencePlanner:
                         status="blocked",
                         dependencies=task.dependencies,
                         attempts=task.attempts,
-                        last_error=(
-                            error if task.id == failed_task_id else task.last_error
-                        ),
+                        last_error=(error if task.id == failed_task_id else task.last_error),
                     )
                 )
                 for task in task_plan.tasks
@@ -1331,15 +1312,10 @@ def test_agent_runtime_applies_model_selected_skill_and_continues(
         message.role == "user" and "Review target src/module.py" in message.content
         for message in model_client.calls[1]
     )
+    assert any("Available skills" in message.content for message in model_client.calls[0])
+    assert not any("Available skills" in message.content for message in model_client.calls[1])
     assert any(
-        "Available skills" in message.content for message in model_client.calls[0]
-    )
-    assert not any(
-        "Available skills" in message.content for message in model_client.calls[1]
-    )
-    assert any(
-        message.role == "user"
-        and message.content.startswith("Skill 'review-change' is now active")
+        message.role == "user" and message.content.startswith("Skill 'review-change' is now active")
         for message in context_manager.received_messages[1]
     )
 
@@ -1508,12 +1484,8 @@ def test_agent_runtime_feeds_back_repeated_skill_selection_in_one_turn(
     assert len(feedback_messages) == 1
     assert "already been activated" in feedback_messages[0].content
     assert notifications == ["正在调用 skill: review-change"]
-    assert not any(
-        "Available skills" in message.content for message in model_client.calls[1]
-    )
-    assert not any(
-        "Available skills" in message.content for message in model_client.calls[2]
-    )
+    assert not any("Available skills" in message.content for message in model_client.calls[1])
+    assert not any("Available skills" in message.content for message in model_client.calls[2])
 
 
 def test_agent_runtime_denies_tool_call_when_permission_policy_blocks_it(
@@ -1522,9 +1494,7 @@ def test_agent_runtime_denies_tool_call_when_permission_policy_blocks_it(
     tmp_path: Path,
 ) -> None:
     result = runtime._run_tool_call(
-        tool_call=ToolCall(
-            name="side_effect", arguments={"content": "x"}, call_id="call_1"
-        ),
+        tool_call=ToolCall(name="side_effect", arguments={"content": "x"}, call_id="call_1"),
         registry=cli_tool_registry([SideEffectTool()]),
         workspace_root=tmp_path,
         permission_policy=PermissionPolicy(mode=PermissionMode.DONT_ASK),
@@ -1543,9 +1513,7 @@ def test_agent_runtime_requires_approval_without_callback_for_write_tool(
     tmp_path: Path,
 ) -> None:
     result = runtime._run_tool_call(
-        tool_call=ToolCall(
-            name="side_effect", arguments={"content": "x"}, call_id="call_1"
-        ),
+        tool_call=ToolCall(name="side_effect", arguments={"content": "x"}, call_id="call_1"),
         registry=cli_tool_registry([SideEffectTool()]),
         workspace_root=tmp_path,
         permission_policy=PermissionPolicy(mode=PermissionMode.DEFAULT),

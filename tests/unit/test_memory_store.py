@@ -6,6 +6,11 @@ from project_agent.errors import ConfigurationError
 from project_agent.runtime.memory.store import FileMemoryStore
 
 
+@pytest.fixture(autouse=True)
+def topic_directory(tmp_path: Path) -> None:
+    (tmp_path / "topics").mkdir()
+
+
 def test_memory_store_initializes_directory_and_entrypoint(tmp_path: Path) -> None:
     store = FileMemoryStore(memory_dir=tmp_path / "memory")
 
@@ -38,21 +43,21 @@ def test_memory_store_reads_and_truncates_entrypoint_by_bytes(tmp_path: Path) ->
 def test_memory_store_scans_markdown_topics(tmp_path: Path) -> None:
     store = FileMemoryStore(memory_dir=tmp_path)
     (tmp_path / "MEMORY.md").write_text("- [Auth](auth.md)", encoding="utf-8")
-    (tmp_path / "auth.md").write_text("# Auth\n\nUse OAuth for login.", encoding="utf-8")
-    (tmp_path / "notes.txt").write_text("ignore", encoding="utf-8")
+    (tmp_path / "topics" / "auth.md").write_text("# Auth\n\nUse OAuth for login.", encoding="utf-8")
+    (tmp_path / "topics" / "notes.txt").write_text("ignore", encoding="utf-8")
 
     files = store.scan_memory_files(max_files=10)
 
     assert len(files) == 1
-    assert files[0].relative_path == "auth.md"
+    assert files[0].relative_path == "topics/auth.md"
     assert files[0].title == "Auth"
     assert files[0].description == "Use OAuth for login."
 
 
 def test_memory_store_limits_scanned_files(tmp_path: Path) -> None:
     store = FileMemoryStore(memory_dir=tmp_path)
-    (tmp_path / "a.md").write_text("# A", encoding="utf-8")
-    (tmp_path / "b.md").write_text("# B", encoding="utf-8")
+    (tmp_path / "topics" / "a.md").write_text("# A", encoding="utf-8")
+    (tmp_path / "topics" / "b.md").write_text("# B", encoding="utf-8")
 
     files = store.scan_memory_files(max_files=1)
 
@@ -61,7 +66,7 @@ def test_memory_store_limits_scanned_files(tmp_path: Path) -> None:
 
 def test_memory_store_reads_memory_file_with_char_limit(tmp_path: Path) -> None:
     store = FileMemoryStore(memory_dir=tmp_path)
-    path = tmp_path / "topic.md"
+    path = tmp_path / "topics" / "topic.md"
     path.write_text("abcdef", encoding="utf-8")
     file = store.scan_memory_files(max_files=10)[0]
 
@@ -83,17 +88,17 @@ def test_memory_store_treats_invalid_utf8_entrypoint_as_empty(tmp_path: Path) ->
 
 def test_memory_store_skips_invalid_utf8_topic_files(tmp_path: Path) -> None:
     store = FileMemoryStore(memory_dir=tmp_path)
-    (tmp_path / "broken.md").write_bytes(b"\xff\xfe")
-    (tmp_path / "valid.md").write_text("# Valid\n\nReadable", encoding="utf-8")
+    (tmp_path / "topics" / "broken.md").write_bytes(b"\xff\xfe")
+    (tmp_path / "topics" / "valid.md").write_text("# Valid\n\nReadable", encoding="utf-8")
 
     files = store.scan_memory_files(max_files=10)
 
-    assert tuple(file.relative_path for file in files) == ("valid.md",)
+    assert tuple(file.relative_path for file in files) == ("topics/valid.md",)
 
 
 def test_memory_store_treats_invalid_utf8_memory_file_as_empty(tmp_path: Path) -> None:
     store = FileMemoryStore(memory_dir=tmp_path)
-    path = tmp_path / "broken.md"
+    path = tmp_path / "topics" / "broken.md"
     path.write_text("# Broken", encoding="utf-8")
     file = store.scan_memory_files(max_files=10)[0]
     path.write_bytes(b"\xff\xfe")

@@ -33,7 +33,6 @@ from project_agent.errors import AgentError, RuntimeLimitError
 from project_agent.runtime.model_clients import MAX_TOOL_CALLS_PER_RESPONSE
 from project_agent.runtime.permissions import (
     PermissionDecision,
-    PermissionPolicy,
     PermissionRequest,
 )
 from project_agent.runtime.tool_registry import ToolRegistry
@@ -85,187 +84,187 @@ class AgentRuntime:
         tool_error_repairer: ToolErrorRepairerProtocol | None = None,
         system_prefix_messages: Sequence[Message] = (),
     ) -> RunResult:
-        state = session_store.load(session_id)
-        history = state.messages
-        messages = history + (Message(role="user", content=user_input),)
-        registry = ToolRegistry(tools)
-        memory_context = self._build_memory_context(
-            memory_context_builder=memory_context_builder,
-            user_input=user_input,
-        )
-        if notification_callback is not None:
-            self._notify_memory_recall(
-                memory_context=memory_context,
-                notification_callback=notification_callback,
-            )
-        if planner is None:
-            return self._run_message_loop(
-                session_id=session_id,
+        with session_store.activity(session_id):
+            state = session_store.load(session_id)
+            history = state.messages
+            messages = history + (Message(role="user", content=user_input),)
+            registry = ToolRegistry(tools)
+            memory_context = self._build_memory_context(
+                memory_context_builder=memory_context_builder,
                 user_input=user_input,
                 history=history,
-                messages=messages,
-                model_client=model_client,
-                registry=registry,
-                session_store=session_store,
-                workspace_root=workspace_root,
-                max_steps=max_steps,
-                repository_context_builder=repository_context_builder,
-                enable_repository_context=enable_repository_context,
-                memory_context=memory_context,
-                context_manager=context_manager,
-                stream_callback=stream_callback,
-                notification_callback=notification_callback,
-                skill_registry=skill_registry,
-                skill_preprocessor=skill_preprocessor,
-                permission_policy=permission_policy,
-                approval_callback=approval_callback,
-                tool_error_repairer=tool_error_repairer,
-                system_prefix_messages=tuple(system_prefix_messages),
             )
+            if notification_callback is not None:
+                self._notify_memory_recall(
+                    memory_context=memory_context,
+                    notification_callback=notification_callback,
+                )
+            if planner is None:
+                return self._run_message_loop(
+                    session_id=session_id,
+                    user_input=user_input,
+                    history=history,
+                    messages=messages,
+                    model_client=model_client,
+                    registry=registry,
+                    session_store=session_store,
+                    workspace_root=workspace_root,
+                    max_steps=max_steps,
+                    repository_context_builder=repository_context_builder,
+                    enable_repository_context=enable_repository_context,
+                    memory_context=memory_context,
+                    context_manager=context_manager,
+                    stream_callback=stream_callback,
+                    notification_callback=notification_callback,
+                    skill_registry=skill_registry,
+                    skill_preprocessor=skill_preprocessor,
+                    permission_policy=permission_policy,
+                    approval_callback=approval_callback,
+                    tool_error_repairer=tool_error_repairer,
+                    system_prefix_messages=tuple(system_prefix_messages),
+                )
 
-        task_plan = self._select_task_plan(
-            existing_task_plan=state.task_plan,
-            planner=planner,
-            user_input=user_input,
-            history=history,
-        )
-        trace: tuple[AgentTraceStep, ...] = ()
-        final_message: Message | None = None
-        step = 1
-        context_state = state.context_state
-        task_plan = self._refresh_blocked_statuses(task_plan)
-
-        while True:
-            task = self._next_executable_task(task_plan)
-            if task is None:
-                break
-            task_plan = self._mark_task_status(task_plan, task.id, "in_progress")
-            trace = trace + (
-                AgentTraceStep(
-                    step=step,
-                    event="task",
-                    summary=f"started {task.title}",
-                    task_id=task.id,
-                    task_status="in_progress",
-                ),
-            )
-            step += 1
-            task_result = self._run_task(
-                session_id=session_id,
-                session_store=session_store,
-                task=self._require_task(task_plan, task.id),
-                task_plan=task_plan,
+            task_plan = self._select_task_plan(
+                existing_task_plan=state.task_plan,
+                planner=planner,
                 user_input=user_input,
                 history=history,
-                messages=messages,
-                model_client=model_client,
-                registry=registry,
-                workspace_root=workspace_root,
-                max_steps=max_steps,
-                start_step=step,
-                repository_context_builder=repository_context_builder,
-                enable_repository_context=enable_repository_context,
-                memory_context=memory_context,
-                context_manager=context_manager,
-                stream_callback=stream_callback,
-                notification_callback=notification_callback,
-                skill_registry=skill_registry,
-                skill_preprocessor=skill_preprocessor,
-                permission_policy=permission_policy,
-                approval_callback=approval_callback,
-                tool_error_repairer=tool_error_repairer,
-                existing_context_state=context_state,
-                system_prefix_messages=tuple(system_prefix_messages),
             )
-            messages = task_result.messages
-            trace = trace + task_result.trace
-            step = task_result.next_step
-            context_state = task_result.context_state
-            if task_result.error is None and task_result.final_message is not None:
-                final_message = task_result.final_message
-                task_plan = self._mark_task_status(task_plan, task.id, "completed")
+            trace: tuple[AgentTraceStep, ...] = ()
+            final_message: Message | None = None
+            step = 1
+            context_state = state.context_state
+            task_plan = self._refresh_blocked_statuses(task_plan)
+
+            while True:
+                task = self._next_executable_task(task_plan)
+                if task is None:
+                    break
+                task_plan = self._mark_task_status(task_plan, task.id, "in_progress")
                 trace = trace + (
                     AgentTraceStep(
                         step=step,
                         event="task",
-                        summary=f"completed {task.title}",
+                        summary=f"started {task.title}",
                         task_id=task.id,
-                        task_status="completed",
+                        task_status="in_progress",
                     ),
                 )
                 step += 1
-                task_plan = self._refresh_blocked_statuses(task_plan)
-                continue
-
-            error = task_result.error or "task failed"
-            failed_task = self._require_task(task_plan, task.id)
-            if failed_task.attempts < 1:
-                task_plan = self._mark_task_status(
-                    task_plan,
-                    task.id,
-                    "pending",
-                    last_error=error,
-                    attempts_increment=True,
+                task_result = self._run_task(
+                    session_id=session_id,
+                    session_store=session_store,
+                    task=self._require_task(task_plan, task.id),
+                    task_plan=task_plan,
+                    user_input=user_input,
+                    history=history,
+                    messages=messages,
+                    model_client=model_client,
+                    registry=registry,
+                    workspace_root=workspace_root,
+                    max_steps=max_steps,
+                    start_step=step,
+                    repository_context_builder=repository_context_builder,
+                    enable_repository_context=enable_repository_context,
+                    memory_context=memory_context,
+                    context_manager=context_manager,
+                    stream_callback=stream_callback,
+                    notification_callback=notification_callback,
+                    skill_registry=skill_registry,
+                    skill_preprocessor=skill_preprocessor,
+                    permission_policy=permission_policy,
+                    approval_callback=approval_callback,
+                    tool_error_repairer=tool_error_repairer,
+                    existing_context_state=context_state,
+                    system_prefix_messages=tuple(system_prefix_messages),
                 )
+                messages = task_result.messages
+                trace = trace + task_result.trace
+                step = task_result.next_step
+                context_state = task_result.context_state
+                if task_result.error is None and task_result.final_message is not None:
+                    final_message = task_result.final_message
+                    task_plan = self._mark_task_status(task_plan, task.id, "completed")
+                    trace = trace + (
+                        AgentTraceStep(
+                            step=step,
+                            event="task",
+                            summary=f"completed {task.title}",
+                            task_id=task.id,
+                            task_status="completed",
+                        ),
+                    )
+                    step += 1
+                    task_plan = self._refresh_blocked_statuses(task_plan)
+                    continue
+
+                error = task_result.error or "task failed"
+                failed_task = self._require_task(task_plan, task.id)
+                if failed_task.attempts < 1:
+                    task_plan = self._mark_task_status(
+                        task_plan,
+                        task.id,
+                        "pending",
+                        last_error=error,
+                        attempts_increment=True,
+                    )
+                    trace = trace + (
+                        AgentTraceStep(
+                            step=step,
+                            event="task",
+                            summary=f"retrying {task.title}: {error}",
+                            task_id=task.id,
+                            task_status="pending",
+                            is_error=True,
+                        ),
+                    )
+                    step += 1
+                    continue
+
+                task_plan = planner.replan_after_failure(
+                    user_input=user_input,
+                    history=history,
+                    task_plan=self._mark_task_status(
+                        task_plan, task.id, "blocked", last_error=error
+                    ),
+                    failed_task_id=task.id,
+                    error=error,
+                )
+                final_message = Message(
+                    role="assistant", content=f"Task {task.id} blocked: {error}"
+                )
+                messages = messages + (final_message,)
                 trace = trace + (
                     AgentTraceStep(
                         step=step,
                         event="task",
-                        summary=f"retrying {task.title}: {error}",
+                        summary=f"blocked {task.title}: {error}",
                         task_id=task.id,
-                        task_status="pending",
+                        task_status="blocked",
                         is_error=True,
                     ),
                 )
-                step += 1
-                continue
+                break
 
-            task_plan = planner.replan_after_failure(
-                user_input=user_input,
-                history=history,
-                task_plan=self._mark_task_status(
-                    task_plan, task.id, "blocked", last_error=error
-                ),
-                failed_task_id=task.id,
-                error=error,
-            )
-            final_message = Message(
-                role="assistant", content=f"Task {task.id} blocked: {error}"
-            )
-            messages = messages + (final_message,)
-            trace = trace + (
-                AgentTraceStep(
-                    step=step,
-                    event="task",
-                    summary=f"blocked {task.title}: {error}",
-                    task_id=task.id,
-                    task_status="blocked",
-                    is_error=True,
-                ),
-            )
-            break
+            if final_message is None:
+                final_message = Message(role="assistant", content="No executable tasks remain.")
+                messages = messages + (final_message,)
 
-        if final_message is None:
-            final_message = Message(
-                role="assistant", content="No executable tasks remain."
+            messages = self._save_turn_state(
+                session_store=session_store,
+                session_id=session_id,
+                messages=messages,
+                task_plan=task_plan,
+                update_task_plan=True,
+                context_state=context_state,
             )
-            messages = messages + (final_message,)
-
-        messages = self._save_turn_state(
-            session_store=session_store,
-            session_id=session_id,
-            messages=messages,
-            task_plan=task_plan,
-            update_task_plan=True,
-            context_state=context_state,
-        )
-        return RunResult(
-            final_message=final_message,
-            messages=messages,
-            trace=trace,
-            task_plan=task_plan,
-            memory_context=memory_context,
-        )
+            return RunResult(
+                final_message=final_message,
+                messages=messages,
+                trace=trace,
+                task_plan=task_plan,
+                memory_context=memory_context,
+            )
 
     def _select_task_plan(
         self,
@@ -359,6 +358,7 @@ class AgentRuntime:
                 tools=registry.tools,
                 stream_callback=stream_callback,
             )
+            self._record_memory_usage(memory_context, model_messages)
             if isinstance(response, Message):
                 final_messages = messages + (response,)
                 final_messages = self._save_turn_state(
@@ -460,14 +460,12 @@ class AgentRuntime:
                     is_error=tool_result.is_error,
                     permission_decision=(
                         str(tool_result.data.get("decision"))
-                        if tool_result.data is not None
-                        and "decision" in tool_result.data
+                        if tool_result.data is not None and "decision" in tool_result.data
                         else None
                     ),
                     reason_code=(
                         str(tool_result.data.get("reason_code"))
-                        if tool_result.data is not None
-                        and "reason_code" in tool_result.data
+                        if tool_result.data is not None and "reason_code" in tool_result.data
                         else None
                     ),
                 )
@@ -539,9 +537,7 @@ class AgentRuntime:
             if message not in merged_messages:
                 merged_messages = (*merged_messages, message)
         remaining_task_ids = tuple(
-            task_id
-            for task_id in pending_task_ids
-            if task_id not in completed_by_task_id
+            task_id for task_id in pending_task_ids if task_id not in completed_by_task_id
         )
         return merged_messages, remaining_task_ids, True
 
@@ -600,9 +596,7 @@ class AgentRuntime:
         existing_context_state: ContextManagementState | None,
         system_prefix_messages: tuple[Message, ...],
     ) -> _TaskRunResult:
-        task_context_message = self._task_context_message(
-            task=task, task_plan=task_plan
-        )
+        task_context_message = self._task_context_message(task=task, task_plan=task_plan)
         model_messages, context_state = self._build_model_messages(
             history=history,
             messages=messages,
@@ -659,6 +653,7 @@ class AgentRuntime:
                 tools=registry.tools,
                 stream_callback=stream_callback,
             )
+            self._record_memory_usage(memory_context, model_messages)
             if isinstance(response, Message):
                 final_messages = messages + (response,)
                 trace = trace + (
@@ -763,14 +758,12 @@ class AgentRuntime:
                     task_id=task.id,
                     permission_decision=(
                         str(tool_result.data.get("decision"))
-                        if tool_result.data is not None
-                        and "decision" in tool_result.data
+                        if tool_result.data is not None and "decision" in tool_result.data
                         else None
                     ),
                     reason_code=(
                         str(tool_result.data.get("reason_code"))
-                        if tool_result.data is not None
-                        and "reason_code" in tool_result.data
+                        if tool_result.data is not None and "reason_code" in tool_result.data
                         else None
                     ),
                 )
@@ -808,14 +801,26 @@ class AgentRuntime:
         *,
         memory_context_builder: MemoryContextBuilderProtocol | None,
         user_input: str,
+        history: Sequence[Message] = (),
     ) -> MemoryContext | None:
         if memory_context_builder is None:
             return None
         try:
-            return memory_context_builder.build(user_input=user_input)
+            return memory_context_builder.build(user_input=user_input, history=history)
         except (AgentError, OSError, ValueError):
             LOGGER.warning("memory context build failed", exc_info=True)
             return None
+
+    def _record_memory_usage(
+        self,
+        context: MemoryContext | None,
+        messages: Sequence[Message],
+    ) -> None:
+        if context is not None and context.on_recalled is not None:
+            try:
+                context.on_recalled(messages)
+            except (AgentError, OSError, ValueError):
+                LOGGER.warning("could not record memory recall", exc_info=True)
 
     def _notify_memory_recall(
         self,
@@ -868,9 +873,7 @@ class AgentRuntime:
         # skill-selection JSON protocol so the model answers instead of
         # selecting another skill.
         skill_catalog_message = (
-            self._build_skill_catalog_message(skill_registry)
-            if skill_catalog_enabled
-            else None
+            self._build_skill_catalog_message(skill_registry) if skill_catalog_enabled else None
         )
         if skill_catalog_message is not None:
             system_messages = (*system_messages, skill_catalog_message)
@@ -883,9 +886,7 @@ class AgentRuntime:
             existing_state=existing_context_state,
         )
 
-    def _build_skill_catalog_message(
-        self, skill_registry: SkillRegistry | None
-    ) -> Message | None:
+    def _build_skill_catalog_message(self, skill_registry: SkillRegistry | None) -> Message | None:
         if skill_registry is None:
             return None
         entries = skill_registry.catalog_entries()
@@ -943,15 +944,12 @@ class AgentRuntime:
             rejection_reason = "skills are not configured; answer directly"
         elif permission_policy is not None and permission_policy.mode.value == "plan":
             rejection_reason = (
-                "skill selection is not allowed in plan mode; respond without "
-                "selecting a skill"
+                "skill selection is not allowed in plan mode; respond without selecting a skill"
             )
         else:
             skill = skill_registry.get(response.name)
             if skill is None:
-                available = ", ".join(
-                    entry.name for entry in skill_registry.catalog_entries()
-                )
+                available = ", ".join(entry.name for entry in skill_registry.catalog_entries())
                 rejection_reason = (
                     f"unknown skill '{response.name}'; model-selectable skills: "
                     f"{available or '(none)'}"
@@ -968,9 +966,7 @@ class AgentRuntime:
                     )
                     expanded = skill_preprocessor.expand_invocation_body(invocation)
                 except SkillError as error:
-                    rejection_reason = (
-                        f"skill '{response.name}' failed to expand: {error}"
-                    )
+                    rejection_reason = f"skill '{response.name}' failed to expand: {error}"
 
         if expanded is not None:
             if notification_callback is not None:
@@ -997,8 +993,7 @@ class AgentRuntime:
         feedback_message = Message(
             role="user",
             content=(
-                f"Your skill selection for '{response.name}' was rejected: "
-                f"{rejection_reason}."
+                f"Your skill selection for '{response.name}' was rejected: {rejection_reason}."
             ),
         )
         updated_trace = trace + (
@@ -1170,9 +1165,7 @@ class AgentRuntime:
                 )
             approved = approval_callback(f"{tool.name}: {outcome.reason}")
             if approved:
-                return registry.invoke(
-                    tool_call=tool_call, workspace_root=workspace_root
-                )
+                return registry.invoke(tool_call=tool_call, workspace_root=workspace_root)
 
         return ToolResult(
             name=tool.name,
@@ -1205,9 +1198,7 @@ class AgentRuntime:
     ) -> tuple[str, str, str | None]:
         arguments = tool_call.arguments if tool_call is not None else {}
         try:
-            serialized_arguments = json.dumps(
-                arguments, ensure_ascii=False, sort_keys=True
-            )
+            serialized_arguments = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
         except TypeError:
             serialized_arguments = repr(arguments)
         return (tool_result.name, serialized_arguments, tool_result.error_code)
@@ -1215,19 +1206,12 @@ class AgentRuntime:
     def _tool_error_summary(self, tool_result: ToolResult) -> str:
         if tool_result.error_code is None:
             return f"Tool failed repeatedly: {tool_result.content}"
-        return (
-            f"Tool failed repeatedly ({tool_result.error_code}): "
-            f"{tool_result.content}"
-        )
+        return f"Tool failed repeatedly ({tool_result.error_code}): {tool_result.content}"
 
     def _task_context_message(self, *, task: Task, task_plan: TaskPlan) -> Message:
-        completed = ", ".join(
-            item.title for item in task_plan.tasks if item.status == "completed"
-        )
+        completed = ", ".join(item.title for item in task_plan.tasks if item.status == "completed")
         remaining = ", ".join(
-            item.title
-            for item in task_plan.tasks
-            if item.status in {"pending", "blocked"}
+            item.title for item in task_plan.tasks if item.status in {"pending", "blocked"}
         )
         return Message(
             role="system",
@@ -1261,16 +1245,14 @@ class AgentRuntime:
                     replace(task, status="blocked")
                     if task.status == "pending"
                     and any(
-                        dependency not in completed_task_ids
-                        for dependency in task.dependencies
+                        dependency not in completed_task_ids for dependency in task.dependencies
                     )
                     else (
                         replace(task, status="pending")
                         if task.status == "blocked"
                         and task.last_error is None
                         and all(
-                            dependency in completed_task_ids
-                            for dependency in task.dependencies
+                            dependency in completed_task_ids for dependency in task.dependencies
                         )
                         else task
                     )
@@ -1294,12 +1276,8 @@ class AgentRuntime:
                     replace(
                         task,
                         status=status,  # type: ignore[arg-type]
-                        last_error=(
-                            last_error if last_error is not None else task.last_error
-                        ),
-                        attempts=(
-                            task.attempts + 1 if attempts_increment else task.attempts
-                        ),
+                        last_error=(last_error if last_error is not None else task.last_error),
+                        attempts=(task.attempts + 1 if attempts_increment else task.attempts),
                     )
                     if task.id == task_id
                     else task

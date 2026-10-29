@@ -96,11 +96,14 @@ class ContextManager:
             summary_message = Message(
                 role="system",
                 content=(
-                    f"Compaction summary ({summary_snapshot.profile} {summary_snapshot.version})\n\n"
+                    f"Compaction summary "
+                    f"({summary_snapshot.profile} {summary_snapshot.version})\n\n"
                     f"{summary_snapshot.summary_text}"
                 ),
             )
-            compacted_messages = self._trim_to_budget((summary_message, *compacted_messages[-6:]))
+            recent = compacted_messages[-6:]
+            memories = tuple(message for message in compacted_messages[:-6] if _is_memory(message))
+            compacted_messages = self._trim_to_budget((summary_message, *memories, *recent))
             budget = self._estimate(compacted_messages)
             updated_state = ContextManagementState(
                 profile=self.profile,
@@ -129,5 +132,18 @@ class ContextManager:
                 return trimmed_messages
             if len(trimmed_messages) <= 1:
                 return trimmed_messages
-            trimmed_messages = (trimmed_messages[0], *trimmed_messages[2:])
+            # Prefer removing old ordinary messages before the independently bounded memory.
+            index = next(
+                (
+                    i
+                    for i in range(1, len(trimmed_messages) - 1)
+                    if not _is_memory(trimmed_messages[i])
+                ),
+                1,
+            )
+            trimmed_messages = (*trimmed_messages[:index], *trimmed_messages[index + 1 :])
         return tuple(messages)
+
+
+def _is_memory(message: Message) -> bool:
+    return message.role == "system" and message.content.startswith("# Persistent Memory\n")

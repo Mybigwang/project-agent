@@ -83,3 +83,10 @@ Invalid config content or unsupported `log_level` values fail fast with a config
 - `tests`: unit tests
 - `examples`: example config and plugin skeleton
 - `docs`: architecture and development notes
+
+## Long-term memory
+
+Project memory now supports background extraction from idle sessions, model-based consolidation,
+recall, and recoverable idle archiving. Use `project-agent memory refresh --force` for a synchronous
+pass, `memory list` to inspect topics, and `memory pin` / `memory forget` to manage retention.
+See [AutoMemory.md](AutoMemory.md) for configuration, lifecycle details, and the new `topics/` layout.

@@ -1,4 +1,5 @@
 from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 from pathlib import Path
 
 from project_agent.core.interfaces import (
@@ -10,7 +11,16 @@ from project_agent.core.interfaces import (
     SessionStore,
     Tool,
 )
-from project_agent.core.types import BudgetSnapshot, CompactionSummarySnapshot, ContextManagementState, Message, SessionState, SkillCall, ToolCall, ToolResult
+from project_agent.core.types import (
+    BudgetSnapshot,
+    CompactionSummarySnapshot,
+    ContextManagementState,
+    Message,
+    SessionState,
+    SkillCall,
+    ToolCall,
+    ToolResult,
+)
 from project_agent.runtime.permissions import ToolPermissionCategory
 
 
@@ -51,6 +61,9 @@ class ExampleModel:
 class InMemorySessionStore:
     def __init__(self) -> None:
         self._store: dict[str, SessionState] = {}
+
+    def activity(self, session_id: str):
+        return nullcontext()
 
     def load(self, session_id: str) -> SessionState:
         return self._store.get(session_id, SessionState())

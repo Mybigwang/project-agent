@@ -41,6 +41,10 @@ from project_agent.runtime.memory import (
     MemoryContextBuilder,
     ModelMemoryRecall,
 )
+from project_agent.runtime.memory.consolidator import MemoryConsolidator
+from project_agent.runtime.memory.extractor import MemoryExtractor
+from project_agent.runtime.memory.maintenance import MemoryMaintenance
+from project_agent.runtime.memory.tools import RememberTool
 from project_agent.runtime.model_clients import (
     MockModelClient,
     OpenAICompatibleModelClient,
@@ -81,6 +85,8 @@ CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x1b]")
 app = typer.Typer(help="Project Agent CLI.")
 mcp_app = typer.Typer(help="Manage MCP servers.")
 app.add_typer(mcp_app, name="mcp")
+memory_app = typer.Typer(help="Generate and manage project memories.")
+app.add_typer(memory_app, name="memory")
 
 
 @app.callback()
@@ -125,6 +131,9 @@ def doctor(ctx: typer.Context) -> None:
     typer.echo(f"mcp_sandbox_mode={settings.mcp_sandbox_mode.value}")
     typer.echo(f"memory_enabled={settings.memory_enabled}")
     typer.echo(f"memory_dir={settings.memory_dir}")
+    typer.echo(f"memory_use_enabled={settings.memory_use_enabled}")
+    typer.echo(f"memory_generate_enabled={settings.memory_generate_enabled}")
+    typer.echo(f"memory_max_unused_days={settings.memory_max_unused_days}")
     typer.echo(f"multi_agent_enabled={settings.multi_agent_enabled}")
     typer.echo(f"coordinator_enabled={settings.coordinator_enabled}")
     typer.echo(f"max_subagents_per_turn={settings.max_subagents_per_turn}")
@@ -172,7 +181,10 @@ def run(
     settings = _require_settings(ctx.obj)
     runtime = AgentRuntime()
     model_client = _build_model_client(settings)
-    session_store = FileSessionStore(settings.session_store_dir)
+    session_store = FileSessionStore(
+        settings.session_store_dir,
+        memory_generation_enabled=settings.memory_enabled and settings.memory_generate_enabled,
+    )
     command_sandbox_runner = build_sandbox_runner(mode=settings.sandbox_mode)
     context_sandbox_runner = build_sandbox_runner(mode=SandboxMode.READ_ONLY)
     tools: list[Tool] = [
@@ -248,64 +260,75 @@ def run(
     active_max_subagent_steps = max_subagent_steps or settings.max_subagent_steps
     orchestrator = MultiAgentOrchestrator(runtime=runtime)
 
-    if prompt is not None:
-        _run_once(
-            runtime=runtime,
-            model_client=model_client,
-            session_store=session_store,
-            tools=tools,
-            settings=settings,
-            session_id=active_session_id,
-            user_input=prompt,
-            show_trace=trace,
-            stream_output=should_stream,
-            max_steps=active_max_steps,
-            repository_context_builder=repository_context_builder,
-            enable_repository_context=settings.enable_repository_context,
-            memory_context_builder=memory_context_builder,
-            skill_registry=skill_registry,
-            skill_preprocessor=skill_preprocessor,
-            permission_policy=permission_policy,
-            context_manager=context_manager,
-            interactive_approval=False,
-            multi_agent_enabled=active_multi_agent,
-            coordinator_enabled=active_coordinator,
-            max_subagents=active_max_subagents,
-            max_subagent_steps=active_max_subagent_steps,
-            orchestrator=orchestrator,
-        )
-        return
-
-    while True:
-        user_input = typer.prompt("You")
-        if user_input.strip() == "/exit":
-            typer.echo("Exiting interactive mode.")
+    maintenance = _build_memory_maintenance(settings)
+    worker = None
+    if maintenance is not None:
+        tools.append(RememberTool(maintenance, active_session_id))
+        worker = maintenance.start(exclude_session_id=active_session_id)
+    try:
+        if prompt is not None:
+            _run_once(
+                runtime=runtime,
+                model_client=model_client,
+                session_store=session_store,
+                tools=tools,
+                settings=settings,
+                session_id=active_session_id,
+                user_input=prompt,
+                show_trace=trace,
+                stream_output=should_stream,
+                max_steps=active_max_steps,
+                repository_context_builder=repository_context_builder,
+                enable_repository_context=settings.enable_repository_context,
+                memory_context_builder=memory_context_builder,
+                skill_registry=skill_registry,
+                skill_preprocessor=skill_preprocessor,
+                permission_policy=permission_policy,
+                context_manager=context_manager,
+                interactive_approval=False,
+                multi_agent_enabled=active_multi_agent,
+                coordinator_enabled=active_coordinator,
+                max_subagents=active_max_subagents,
+                max_subagent_steps=active_max_subagent_steps,
+                orchestrator=orchestrator,
+            )
             return
-        _run_once(
-            runtime=runtime,
-            model_client=model_client,
-            session_store=session_store,
-            tools=tools,
-            settings=settings,
-            session_id=active_session_id,
-            user_input=user_input,
-            show_trace=trace,
-            stream_output=should_stream,
-            max_steps=active_max_steps,
-            repository_context_builder=repository_context_builder,
-            enable_repository_context=settings.enable_repository_context,
-            memory_context_builder=memory_context_builder,
-            skill_registry=skill_registry,
-            skill_preprocessor=skill_preprocessor,
-            permission_policy=permission_policy,
-            context_manager=context_manager,
-            interactive_approval=True,
-            multi_agent_enabled=active_multi_agent,
-            coordinator_enabled=active_coordinator,
-            max_subagents=active_max_subagents,
-            max_subagent_steps=active_max_subagent_steps,
-            orchestrator=orchestrator,
-        )
+
+        while True:
+            user_input = typer.prompt("You")
+            if user_input.strip() == "/exit":
+                typer.echo("Exiting interactive mode.")
+                return
+            _run_once(
+                runtime=runtime,
+                model_client=model_client,
+                session_store=session_store,
+                tools=tools,
+                settings=settings,
+                session_id=active_session_id,
+                user_input=user_input,
+                show_trace=trace,
+                stream_output=should_stream,
+                max_steps=active_max_steps,
+                repository_context_builder=repository_context_builder,
+                enable_repository_context=settings.enable_repository_context,
+                memory_context_builder=memory_context_builder,
+                skill_registry=skill_registry,
+                skill_preprocessor=skill_preprocessor,
+                permission_policy=permission_policy,
+                context_manager=context_manager,
+                interactive_approval=True,
+                multi_agent_enabled=active_multi_agent,
+                coordinator_enabled=active_coordinator,
+                max_subagents=active_max_subagents,
+                max_subagent_steps=active_max_subagent_steps,
+                orchestrator=orchestrator,
+            )
+    finally:
+        if maintenance is not None:
+            maintenance.stop()
+        if worker is not None:
+            worker.join(timeout=0.1)
 
 
 def _parse_command(text: str) -> tuple[str | None, str]:
@@ -367,9 +390,7 @@ def _run_once(
         sys.stdout.flush()
 
     def approval_callback(message: str) -> bool:
-        return typer.confirm(
-            f"Approve action? {_sanitize_cli_text(message)}", default=False
-        )
+        return typer.confirm(f"Approve action? {_sanitize_cli_text(message)}", default=False)
 
     cmd, actual_input = _parse_command(user_input)
 
@@ -553,9 +574,7 @@ def _sanitize_final_output(value: str) -> str:
 
 
 def _sanitize_cli_text(value: str) -> str:
-    return (
-        CONTROL_CHAR_PATTERN.sub("?", value).replace("\r", "\\r").replace("\n", "\\n")
-    )
+    return CONTROL_CHAR_PATTERN.sub("?", value).replace("\r", "\\r").replace("\n", "\\n")
 
 
 def _build_model_client(settings: Settings) -> ModelClient:
@@ -573,8 +592,78 @@ def _build_model_client(settings: Settings) -> ModelClient:
     )
 
 
+def _build_memory_maintenance(settings: Settings) -> MemoryMaintenance | None:
+    if (
+        not settings.memory_enabled
+        or not settings.memory_generate_enabled
+        or settings.sandbox_mode == SandboxMode.READ_ONLY
+        or settings.permission_mode.value == "plan"
+    ):
+        return None
+    store = FileMemoryStore(memory_dir=settings.memory_dir)
+    client = _build_model_client(settings)
+    return MemoryMaintenance(
+        store=store,
+        sessions=FileSessionStore(settings.session_store_dir),
+        extractor=MemoryExtractor(client),
+        consolidator=MemoryConsolidator(client, store),
+        idle_minutes=settings.memory_idle_minutes,
+        max_sessions=settings.memory_max_sessions_per_pass,
+        max_unused_days=settings.memory_max_unused_days,
+    )
+
+
+@memory_app.command("refresh")
+def memory_refresh(ctx: typer.Context, force: bool = typer.Option(False, "--force")) -> None:
+    """Extract idle sessions and consolidate memories; --force skips idle time only."""
+    maintenance = _build_memory_maintenance(_require_settings(ctx.obj))
+    if maintenance is None:
+        raise AgentError("memory generation is disabled or the workspace is read-only")
+    result = maintenance.refresh(force=force)
+    typer.echo(
+        f"extracted={result.extracted} rejected={result.rejected} "
+        f"merged={result.merged} deferred={result.deferred} "
+        f"archived={result.archived} skipped={result.skipped} failed={result.failed}"
+    )
+    if result.failed:
+        raise typer.Exit(1)
+
+
+@memory_app.command("list")
+def memory_list(ctx: typer.Context) -> None:
+    """Show active and archived topics without changing their usage timestamps."""
+    store = FileMemoryStore(memory_dir=_require_settings(ctx.obj).memory_dir)
+    for topic, metadata in sorted(store.read_state()["topics"].items()):
+        typer.echo(f"{topic}: {metadata['status']} pinned={metadata['pinned']}")
+
+
+def _writable_memory_store(ctx: typer.Context) -> FileMemoryStore:
+    settings = _require_settings(ctx.obj)
+    if settings.sandbox_mode == SandboxMode.READ_ONLY or settings.permission_mode.value == "plan":
+        raise AgentError("memory changes are disabled in read-only or plan mode")
+    store = FileMemoryStore(memory_dir=settings.memory_dir)
+    store.ensure_initialized()
+    return store
+
+
+@memory_app.command("pin")
+def memory_pin(
+    ctx: typer.Context, topic: str, unpin: bool = typer.Option(False, "--unpin")
+) -> None:
+    """Keep a topic active regardless of idle time, or remove that protection."""
+    _writable_memory_store(ctx).set_pinned(topic, not unpin)
+    typer.echo(f"{topic}: pinned={not unpin}")
+
+
+@memory_app.command("forget")
+def memory_forget(ctx: typer.Context, topic: str) -> None:
+    """Delete a topic and block its automatic regeneration until explicitly remembered."""
+    _writable_memory_store(ctx).forget(topic)
+    typer.echo(f"Forgot {topic}; automatic regeneration is blocked.")
+
+
 def _build_memory_context_builder(settings: Settings) -> MemoryContextBuilder | None:
-    if not settings.memory_enabled:
+    if not settings.memory_enabled or not settings.memory_use_enabled:
         return None
     return MemoryContextBuilder(
         store=FileMemoryStore(memory_dir=settings.memory_dir),
@@ -584,6 +673,10 @@ def _build_memory_context_builder(settings: Settings) -> MemoryContextBuilder | 
         max_relevant_files=settings.memory_max_relevant_files,
         max_relevant_file_chars=settings.memory_max_relevant_file_chars,
         max_manifest_files=settings.memory_max_manifest_files,
+        max_unused_days=settings.memory_max_unused_days,
+        prompt_max_chars=min(
+            settings.memory_prompt_max_chars, max(256, settings.context_window_tokens // 2)
+        ),
     )
 
 
@@ -593,9 +686,7 @@ def _build_skill_registry(settings: Settings) -> SkillRegistry:
         builtin_root = Path(__file__).resolve().parent / "skills" / "builtin"
     project_root = settings.project_skills_dir if settings.skills_enabled else None
     user_root = settings.user_skills_dir if settings.skills_enabled else None
-    skills = load_skills(
-        builtin_root=builtin_root, user_root=user_root, project_root=project_root
-    )
+    skills = load_skills(builtin_root=builtin_root, user_root=user_root, project_root=project_root)
     return SkillRegistry(skills)
 
 

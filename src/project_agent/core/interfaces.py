@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -83,6 +84,8 @@ class ToolErrorRepairerProtocol(Protocol):
 
 
 class SessionStore(Protocol):
+    def activity(self, session_id: str) -> AbstractContextManager[None]: ...
+
     def load(self, session_id: str) -> SessionState: ...
 
     def save(self, session_id: str, state: SessionState) -> None: ...
@@ -113,7 +116,7 @@ class RepositoryContextBuilderProtocol(Protocol):
 
 
 class MemoryContextBuilderProtocol(Protocol):
-    def build(self, *, user_input: str) -> MemoryContext: ...
+    def build(self, *, user_input: str, history: Sequence[Message] = ()) -> MemoryContext: ...
 
 
 class ContextBudgetEstimatorProtocol(Protocol):

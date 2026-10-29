@@ -96,10 +96,42 @@ def test_console_script_points_to_main_entry() -> None:
     pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
 
-    assert (
-        pyproject["project"]["scripts"]["project-agent"]
-        == "project_agent.cli:main_entry"
-    )
+    assert pyproject["project"]["scripts"]["project-agent"] == "project_agent.cli:main_entry"
+
+
+def test_memory_cli_refresh_list_pin_and_forget(tmp_path: Path) -> None:
+    from project_agent.runtime.memory.store import FileMemoryStore
+
+    store = FileMemoryStore(memory_dir=tmp_path / ".project_agent" / "memory")
+    store.ensure_initialized()
+    store.topic_path("testing").write_text("# Testing\nUse UTC.", encoding="utf-8")
+    base = ["--workspace-root", str(tmp_path), "memory"]
+    result = runner.invoke(app, [*base, "refresh", "--force"])
+    assert result.exit_code == 0, result.output
+    assert "failed=0" in result.stdout
+    assert "rejected=0" in result.stdout
+    result = runner.invoke(app, [*base, "pin", "testing"])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, [*base, "list"])
+    assert "testing: active pinned=True" in result.stdout
+    result = runner.invoke(app, [*base, "forget", "testing"])
+    assert result.exit_code == 0, result.output
+    assert not store.topic_path("testing").exists()
+    assert "testing" in store.read_state()["forgotten"]
+
+
+def test_memory_read_and_generation_switches_are_independent(tmp_path: Path) -> None:
+    use_only = _make_settings(tmp_path, memory_generate_enabled=False)
+    assert cli_module._build_memory_context_builder(use_only) is not None
+    assert cli_module._build_memory_maintenance(use_only) is None
+    generate_only = _make_settings(tmp_path, memory_use_enabled=False)
+    assert cli_module._build_memory_context_builder(generate_only) is None
+    assert cli_module._build_memory_maintenance(generate_only) is not None
+
+
+def test_memory_generation_is_disabled_in_read_only_mode(tmp_path: Path) -> None:
+    settings = _make_settings(tmp_path, sandbox_mode=SandboxMode.READ_ONLY)
+    assert cli_module._build_memory_maintenance(settings) is None
 
 
 def test_help_command_succeeds() -> None:
@@ -118,10 +150,7 @@ def test_doctor_command_uses_cli_overrides(tmp_path: Path) -> None:
     assert "prompt_cache=auto" in result.stdout
     assert "sandbox_mode=workspace_write" in result.stdout
     assert "memory_enabled=True" in result.stdout
-    assert (
-        f"memory_dir={(tmp_path / '.project_agent' / 'memory').resolve()}"
-        in result.stdout
-    )
+    assert f"memory_dir={(tmp_path / '.project_agent' / 'memory').resolve()}" in result.stdout
     assert "multi_agent_enabled=True" in result.stdout
     assert "coordinator_enabled=False" in result.stdout
     assert "max_subagents_per_turn=4" in result.stdout
@@ -577,9 +606,7 @@ def test_run_command_passes_memory_builder_when_enabled(
 
     monkeypatch.setattr(cli_module, "_run_once", fake_run_once)
 
-    result = runner.invoke(
-        app, ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"]
-    )
+    result = runner.invoke(app, ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"])
 
     assert result.exit_code == 0
     builder = captured["memory_context_builder"]
@@ -600,9 +627,7 @@ def test_run_command_skips_memory_builder_when_disabled(
 
     monkeypatch.setattr(cli_module, "_run_once", fake_run_once)
 
-    result = runner.invoke(
-        app, ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"]
-    )
+    result = runner.invoke(app, ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"])
 
     assert result.exit_code == 0
     assert captured["memory_context_builder"] is None
@@ -610,11 +635,11 @@ def test_run_command_skips_memory_builder_when_disabled(
 
 def test_run_command_prints_memory_recall(tmp_path: Path) -> None:
     memory_dir = tmp_path / ".project_agent" / "memory"
-    memory_dir.mkdir(parents=True)
+    (memory_dir / "topics").mkdir(parents=True)
     (memory_dir / "MEMORY.md").write_text(
-        "- [Auth](auth.md) — OAuth decisions", encoding="utf-8"
+        "- [Auth](topics/auth.md) — OAuth decisions", encoding="utf-8"
     )
-    (memory_dir / "auth.md").write_text("# Auth\n\nOAuth decisions", encoding="utf-8")
+    (memory_dir / "topics/auth.md").write_text("# Auth\n\nOAuth decisions", encoding="utf-8")
 
     result = runner.invoke(
         app,
@@ -622,17 +647,16 @@ def test_run_command_prints_memory_recall(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert "Memory recall:\n  - auth.md\n" in result.stdout
-
+    assert "Memory recall:\n  - topics/auth.md\n" in result.stdout
 
 
 def test_run_command_stream_prints_memory_recall_before_final_output(tmp_path: Path) -> None:
     memory_dir = tmp_path / ".project_agent" / "memory"
-    memory_dir.mkdir(parents=True)
+    (memory_dir / "topics").mkdir(parents=True)
     (memory_dir / "MEMORY.md").write_text(
-        "- [Auth](auth.md) — OAuth decisions", encoding="utf-8"
+        "- [Auth](topics/auth.md) — OAuth decisions", encoding="utf-8"
     )
-    (memory_dir / "auth.md").write_text("# Auth\n\nOAuth decisions", encoding="utf-8")
+    (memory_dir / "topics/auth.md").write_text("# Auth\n\nOAuth decisions", encoding="utf-8")
 
     result = runner.invoke(
         app,
@@ -640,27 +664,26 @@ def test_run_command_stream_prints_memory_recall_before_final_output(tmp_path: P
     )
 
     assert result.exit_code == 0
-    assert "Memory recall:\n  - auth.md\nMock response" in result.stdout
-
+    assert "Memory recall:\n  - topics/auth.md\nMock response" in result.stdout
 
 
 def test_build_memory_context_builder_default_recall_selects_topic_file(
     tmp_path: Path,
 ) -> None:
     memory_dir = tmp_path / ".project_agent" / "memory"
-    memory_dir.mkdir(parents=True)
+    (memory_dir / "topics").mkdir(parents=True)
     (memory_dir / "MEMORY.md").write_text(
-        "- [Auth](auth.md) — OAuth decisions", encoding="utf-8"
+        "- [Auth](topics/auth.md) — OAuth decisions", encoding="utf-8"
     )
-    (memory_dir / "auth.md").write_text("# Auth\n\nOAuth decisions", encoding="utf-8")
+    (memory_dir / "topics/auth.md").write_text("# Auth\n\nOAuth decisions", encoding="utf-8")
     settings = _make_settings(tmp_path, memory_dir=memory_dir)
 
     builder = cli_module._build_memory_context_builder(settings)
 
     assert builder is not None
     context = builder.build(user_input="explain auth")
-    assert tuple(file.relative_path for file in context.relevant_files) == ("auth.md",)
-    assert "## Relevant memory: auth.md" in context.prompt
+    assert tuple(file.relative_path for file in context.relevant_files) == ("topics/auth.md",)
+    assert "## Relevant memory: topics/auth.md" in context.prompt
 
 
 def test_run_command_uses_session_history(tmp_path: Path) -> None:
@@ -698,13 +721,7 @@ def test_run_command_executes_project_skill_prompt(tmp_path: Path) -> None:
     skill_path = tmp_path / ".project_agent" / "skills" / "demo" / "SKILL.md"
     skill_path.parent.mkdir(parents=True, exist_ok=True)
     skill_path.write_text(
-        (
-            "---\n"
-            "name: demo\n"
-            "description: demo skill\n"
-            "---\n"
-            "Expanded {{args[0]}}"
-        ),
+        ("---\nname: demo\ndescription: demo skill\n---\nExpanded {{args[0]}}"),
         encoding="utf-8",
     )
 
@@ -818,9 +835,7 @@ def test_run_command_passes_repository_context_settings_to_runtime(
 
     monkeypatch.setattr(cli_module, "_run_once", fake_run_once)
 
-    result = runner.invoke(
-        app, ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"]
-    )
+    result = runner.invoke(app, ["--workspace-root", str(tmp_path), "run", "--prompt", "hello"])
 
     assert result.exit_code == 0
     assert captured["enable_repository_context"] is False
@@ -838,9 +853,7 @@ def test_run_command_passes_repository_context_settings_to_runtime(
 def test_task_progress_and_trace_sanitize_control_characters(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    task_plan = TaskPlan(
-        tasks=(Task(id="task_1", title="bad\x1b[31m\r\ntext", description="bad"),)
-    )
+    task_plan = TaskPlan(tasks=(Task(id="task_1", title="bad\x1b[31m\r\ntext", description="bad"),))
     trace = (
         AgentTraceStep(
             step=1,

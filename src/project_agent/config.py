@@ -80,6 +80,12 @@ class Settings:
     mcp_config_file: Path
     mcp_request_timeout_seconds: float
     mcp_max_description_chars: int
+    memory_use_enabled: bool = True
+    memory_generate_enabled: bool = True
+    memory_idle_minutes: int = 30
+    memory_max_sessions_per_pass: int = 5
+    memory_max_unused_days: int = 30
+    memory_prompt_max_chars: int = 12000
 
 
 def load_settings(
@@ -112,10 +118,14 @@ def load_settings(
         "model_api_key",
         os.getenv("PROJECT_AGENT_API_KEY", config_values.get("model_api_key", "")),
     )
-    prompt_cache = override_values.get(
-        "prompt_cache",
-        os.getenv("PROJECT_AGENT_PROMPT_CACHE", config_values.get("prompt_cache", "auto")),
-    ).strip().lower()
+    prompt_cache = (
+        override_values.get(
+            "prompt_cache",
+            os.getenv("PROJECT_AGENT_PROMPT_CACHE", config_values.get("prompt_cache", "auto")),
+        )
+        .strip()
+        .lower()
+    )
     environment = override_values.get(
         "environment",
         os.getenv("PROJECT_AGENT_ENVIRONMENT", config_values.get("environment", "development")),
@@ -502,6 +512,28 @@ def load_settings(
             ),
         )
     )
+
+    def memory_setting(name: str, default: str) -> str:
+        return override_values.get(
+            name, os.getenv("PROJECT_AGENT_" + name.upper(), config_values.get(name, default))
+        )
+
+    memory_use_enabled = _parse_bool(memory_setting("memory_use_enabled", "true"))
+    memory_generate_enabled = _parse_bool(memory_setting("memory_generate_enabled", "true"))
+    memory_idle_minutes = int(memory_setting("memory_idle_minutes", "30"))
+    memory_max_sessions_per_pass = int(memory_setting("memory_max_sessions_per_pass", "5"))
+    memory_max_unused_days = int(memory_setting("memory_max_unused_days", "30"))
+    memory_prompt_max_chars = int(memory_setting("memory_prompt_max_chars", "12000"))
+    for name, number in (
+        ("memory_idle_minutes", memory_idle_minutes),
+        ("memory_max_sessions_per_pass", memory_max_sessions_per_pass),
+        ("memory_max_unused_days", memory_max_unused_days),
+        ("memory_prompt_max_chars", memory_prompt_max_chars),
+    ):
+        _validate_positive_int(number, name)
+    if memory_prompt_max_chars < 256:
+        raise ConfigurationError("memory_prompt_max_chars must be >= 256")
+
     multi_agent_enabled = _parse_bool(
         override_values.get(
             "multi_agent_enabled",
@@ -713,6 +745,12 @@ def load_settings(
         enable_auto_compaction=enable_auto_compaction,
         enable_full_compaction=enable_full_compaction,
         repository_context_max_tokens=repository_context_max_tokens,
+        memory_use_enabled=memory_use_enabled,
+        memory_generate_enabled=memory_generate_enabled,
+        memory_idle_minutes=memory_idle_minutes,
+        memory_max_sessions_per_pass=memory_max_sessions_per_pass,
+        memory_max_unused_days=memory_max_unused_days,
+        memory_prompt_max_chars=memory_prompt_max_chars,
         memory_enabled=memory_enabled,
         memory_dir=memory_dir,
         memory_entrypoint_max_lines=memory_entrypoint_max_lines,

@@ -1,310 +1,116 @@
-# Project Agent Memory 系统说明
+# Project Agent 长期记忆
 
-本次实现的是一套参考 Claude Code 设计的文件化 memory 系统。核心目标是：让 Agent 在每轮用户请求开始时读取持久记忆索引，交给模型判断哪些 topic memory 与当前输入相关，再把被召回的记忆内容注入主模型 prompt。
+长期记忆分为两个独立流程：后台从历史会话提取并合并经验；用户请求开始时召回相关主题并注入模型。模型参数不会因记忆而改变。
 
-## 1. 文件化 memory 存储
-
-默认目录：
+## 目录与职责
 
 ```text
-<workspace_root>/.project_agent/memory/
+.project_agent/
+  sessions/<session_id>.json     # 原始会话、任务和上下文状态
+  memory/
+    MEMORY.md                   # 程序生成的活跃主题索引
+    topics/<topic>.md            # 正式记忆正文，归档后仍保留
+    candidates/<session_hash>.json  # 待合并候选及会话版本
+    state.json                  # 主题元数据、已处理版本、遗忘标记
 ```
 
-目录约定：
+只扫描 `topics/` 下的主题 Markdown，候选不会进入召回。主题名使用不超过 64 字符的小写英文 slug，例如 `testing`、`project_preferences`。
 
-```text
-.project_agent/memory/
-  MEMORY.md          # 入口索引
-  user_preferences.md
-  release_process.md
-  external_refs.md
-```
+**旧目录升级：** 根目录下的旧主题不再参与召回，也不会自动搬移。首次使用新版本前，请将旧主题文件移入 `topics/` 并使用合法主题名；`MEMORY.md` 之后由程序重新生成。旧文件不会被本次代码升级删除。不要把必须执行的规则仅保存在记忆里，应继续使用项目规则文档。
 
-实现位置：
+## 从会话生成记忆
 
-- `src/project_agent/runtime/memory/store.py`
-- `src/project_agent/runtime/memory/builder.py`
+`project-agent run` 启动时创建一个后台维护线程，每次最多处理 5 个会话。它只处理已经空闲 30 分钟、包含用户输入和助手正文、尚未处理当前版本的历史会话，并排除当前会话和子 Agent 会话。
 
-特点：
+会话版本取完整持久化内容的 SHA-256；更新时间来自会话文件。运行时使用会话活动锁，提取和合并的模型调用不会长时间持有会话锁。写入前再次检查活动状态和版本：会话已恢复工作或内容已改变时，本次结果不发布。
 
-- 不使用数据库或隐藏状态。
-- `MEMORY.md` 只作为入口索引。
-- 具体长期记忆拆分到独立 Markdown topic 文件。
-- 首次运行会自动创建 memory 目录和 `MEMORY.md`，不会覆盖已有文件。
+记忆扫描使用专用的对话快照，只解析 messages 和生成开关，不恢复 agent_runs、任务计划或上下文管理状态。这些运行字段的格式不会影响有效对话的提取；正常恢复会话时仍严格校验完整运行状态。
 
-## 2. MEMORY.md 入口索引
+1. `MemoryExtractor` 接收最近最多 60000 字符的会话材料和已有主题名，输出最多 10 条候选。提取长期偏好、项目约束、可复用流程和已验证经验；不保存临时进度、猜测和凭证。
+2. 每条候选包含 topic、content、evidence、source_session_id、created_at。evidence 必须是实际传入模型的输入材料中的连续原文片段，不接受改写或模糊匹配。不匹配的候选单独丢弃并计入 rejected，其余候选继续处理；日志只记录数量，不输出原文。原文匹配只能验证来源存在，不能证明模型归纳一定正确。
+3. 候选通过结构、长度、路径名和明显凭证检查后保存到 candidates。失败的合并可以复用候选，避免再次提取。
+4. `MemoryConsolidator` 将候选按主题与已有正文合并。重复内容合并，明确纠正更新旧事实，无法确定的冲突返回 deferred 并保留候选。
+5. 程序校验模型返回的主题集合和正文，使用原子替换保存主题、状态和索引。主题来源会话保存在 state.json 的 sources 中，原始依据仍可在会话中查看。
+6. 全部通过校验的候选处理成功才记录已处理版本并删除该候选批次。空提取或所有候选都因原文不匹配被丢弃时，也记录该版本已处理，避免启动时重复提取；会话内容变化产生新版本后会再次处理。模型请求或响应结构错误仍算失败，不标记成功。
 
-`MEMORY.md` 是轻量索引，不应该堆积长正文。
+处理过程有跨进程维护锁，状态更新有短期文件锁，并检查合并期间主题是否被修改，避免静默覆盖新内容。多个文件的发布不构成数据库事务；进程中断后未完成的候选可重试，索引会在下一次维护或构建时重建。
 
-推荐写法：
+后台任务随 CLI 进程退出而停止，不是常驻服务。很短的单次命令可能在后台完成前退出；需要确定完成时，使用同步的 `memory refresh`。本轮刚结束的会话通常在下次启动时处理。
 
-```markdown
-- [User preferences](user_preferences.md) — 用户长期协作偏好
-- [Release process](release_process.md) — 项目发布流程约束
-```
+## 使用与恢复
 
-运行时会把当前 `MEMORY.md` 内容放进 memory system prompt。若为空，会明确提示 `MEMORY.md is currently empty`。
+每个用户回合只构建一次 MemoryContext，同一回合内复用：
 
-相关限制：
+1. 更新归档状态并读取活跃索引。
+2. 根据当前输入、近期用户消息、文件标题和描述生成候选清单，优先匹配内容、固定主题和近期使用主题。
+3. 召回模型选择最多 3 个主题；如果没有选中活跃主题，再搜索归档主题。
+4. 每个主题最多读取 3000 字符，并限制完整记忆提示词预算；放不下的主题整体移除。
+5. 以 system 消息加入上下文。提示词明确这些是可能过时的历史依据，当前用户要求和已验证事实优先。
+6. 上下文压缩优先保留独立预算内的 Memory 和最新消息；极小预算仍可能裁掉 Memory。
+7. 只有主题正文实际保留在请求中、模型调用成功返回，才刷新 last_recalled_at。被裁掉、仅被扫描或失败的模型请求不刷新。它代表成功送入模型，不代表模型一定采用。
 
-- `memory_entrypoint_max_lines`：默认 200 行。
-- `memory_entrypoint_max_bytes`：默认 25000 bytes。
+归档主题成功送入模型后恢复为 active，并重新加入 MEMORY.md。每轮最多记录一次召回，记忆写入失败不会使主任务失败。
 
-超出后会截断，并在 prompt 中提示 index 被截断。
+## 闲置归档与遗忘
 
-## 3. Topic memory 文件
+主题元数据包含 created_at、updated_at、last_recalled_at、status、pinned、sources。
 
-除 `MEMORY.md` 外，memory 目录下其他 `.md` 文件都是 topic memory。
+- 默认 30 天没有召回的主题标记 archived，从活跃清单和索引中移出，正文仍留在 topics。
+- 新建、内容更新或成功召回都会获得新的保留时间；单纯扫描、索引重建和内容未变化的合并不会延长保留时间。
+- pinned=true 的主题不因闲置归档。pin 已归档主题也会将其恢复。
+- forget 删除该主题正文、清理候选中的对应条目，并保存主题名的遗忘标记，阻止其自动生成。
+- 用户通过 remember 明确重新保存同主题时，可以解除遗忘标记。
 
-每个 topic 文件建议只表达一个主题，例如：
+遗忘标记按主题名生效，不是语义级隐私删除。原始会话不在 forget 的删除范围内；同一信息若以其他主题名重新提取，仍有再次生成的可能。
 
-```markdown
-# User preferences
+## 明确要求记住
 
-用户希望每次回复前称呼 Mengqing。
+当用户明确说“记住”时，主 Agent 可调用 `remember` 工具，提供 topic、content、evidence 和可选的 pinned。工具复用相同的合并和保存流程；冲突暂缓时返回错误供用户澄清，不假装已保存。此工具属于 WRITE 类别，经过已有权限策略；只读沙箱或 plan 模式不注册该工具，也不启动后台生成。
 
-**Why:** 项目 CLAUDE.md 明确要求。
-**How to apply:** 所有普通回复开头使用 Mengqing。
-```
+## 配置
 
-扫描 topic 文件时，系统提取轻量 manifest：
-
-- `relative_path`
-- `title`：第一个 Markdown heading；没有 heading 时使用文件 stem。
-- `description`：标题后的第一个非空、非 heading 行。
-- `mtime`
-
-系统不会一开始读取所有 topic 全文，只先读取 manifest，降低 prompt 成本。
-
-## 4. 大模型驱动 Relevant Memory Recall
-
-当前版本已不是关键词匹配。
-
-实现位置：
-
-- `src/project_agent/runtime/memory/recall.py`
-
-流程：
-
-1. `MemoryContextBuilder.build(user_input=...)` 先初始化 memory 目录。
-2. 读取 `MEMORY.md`。
-3. 扫描 topic memory manifest。
-4. 调用 `ModelMemoryRecall.select(...)`。
-5. recall 模型收到：
-   - 当前用户输入。
-   - `max_files` 限制。
-   - memory manifest。
-6. recall 模型必须返回 JSON：
-
-```json
-{"files":["relative/path.md"]}
-```
-
-7. 系统只接受 manifest 中存在的路径，忽略未知路径，并限制最多 `memory_max_relevant_files` 个。
-8. 被选中的 topic 文件全文会被读取并注入 memory prompt。
-
-这意味着 relevant recall 发生在主模型调用之前：先让模型根据 manifest 选择记忆，再把选中的记忆内容放入主模型 prompt。
-
-## 5. 每轮只 recall 一次，后续复用
-
-实现位置：
-
-- `src/project_agent/runtime/agent.py`
-
-`AgentRuntime.run_turn()` 会在每个 user turn 开始时构建一次 `MemoryContext`：
-
-```python
-memory_context = self._build_memory_context(
-    memory_context_builder=memory_context_builder,
-    user_input=user_input,
-)
-```
-
-随后这个 `memory_context` 会在同一轮内复用：
-
-- 普通首次模型调用。
-- tool result 后重新构建模型消息。
-- skill message 后重新构建模型消息。
-- planner task 首次调用。
-- planner task tool / skill 后重新构建模型消息。
-
-这样既能保证 memory prompt 在每次主模型调用前都存在，又避免 tool-heavy 流程中反复调用 recall 模型。
-
-## 6. Memory prompt 注入顺序
-
-模型消息构建时的顺序是：
-
-1. task prefix message（如果是 planner task）。
-2. repository context system message。
-3. memory system message。
-4. skill catalog system message。
-5. conversation messages。
-6. `ContextManager.prepare_messages(...)`。
-
-因此 memory 会先进入模型消息队列，再经过 context manager / compaction 处理。
-
-## 7. 终端显示 recall 结果
-
-现在 CLI 会在终端显示本轮 memory recall 结果。
-
-实现位置：
-
-- `src/project_agent/core/types.py`
-- `src/project_agent/runtime/agent.py`
-- `src/project_agent/cli.py`
-
-`RunResult` 新增：
-
-```python
-memory_context: MemoryContext | None = None
-```
-
-CLI 在输出最终回答前会显示：
-
-```text
-Memory recall:
-  - auth.md
-  - release_process.md
-```
-
-如果本轮没有召回任何 topic 文件，或者 memory 被禁用，则不显示 memory recall 行，避免干扰普通输出。
-
-这用于实际测试时确认大模型本轮到底选择了哪些记忆文件。
-
-## 8. 相关 topic 内容注入
-
-被 recall 选中的 topic 文件会以 section 形式注入：
-
-```markdown
-## Relevant recalled memories
-
-## Relevant memory: auth.md
-
-# Auth
-
-OAuth login decisions...
-```
-
-每个 topic 文件注入内容受配置限制：
-
-- `memory_max_relevant_file_chars`：默认 3000 chars。
-
-超出后会追加：
-
-```text
-[Memory file truncated]
-```
-
-## 9. Memory 写入与维护规则
-
-memory prompt 会提醒模型：
-
-应该保存：
-
-- 长期用户偏好。
-- 长期项目偏好。
-- 跨会话决策。
-- 非显而易见的项目背景。
-- 外部系统引用及其意义。
-
-不应该保存：
-
-- secret、token、私钥。
-- 可从代码或 git history 直接推导的信息。
-- 临时任务状态。
-- 一次性 debugging notes。
-- 大段日志或原始 tool output。
-- 重复、过时、猜测性信息。
-
-保存流程：
-
-1. 创建或更新 topic markdown 文件。
-2. 在 `MEMORY.md` 增加或更新一行索引。
-3. 更新或删除过时记忆，不重复追加。
-
-当前版本没有新增专用 memory tool；因为 memory 目录在 workspace 内，模型可通过现有文件工具维护这些 Markdown 文件。
-
-## 10. 容错与安全
-
-实现位置：
-
-- `src/project_agent/config.py`
-- `src/project_agent/runtime/memory/store.py`
-
-约束：
-
-- `memory_dir` 必须位于 `workspace_root` 内。
-- 防止 memory path traversal。
-- `MEMORY.md` 或 topic 文件非 UTF-8 / 不可读时不会让整轮 Agent 失败。
-
-容错行为：
-
-- `MEMORY.md` 读取失败：按空内容处理。
-- topic manifest 读取失败：跳过该文件。
-- recalled topic 读取失败：按空内容处理。
-
-## 11. CLI doctor 输出
-
-`project-agent doctor` 会显示：
-
-```text
-memory_enabled=True
-memory_dir=<workspace_root>/.project_agent/memory
-```
-
-用于确认 memory 是否启用以及实际目录。
-
-## 12. 配置一览
-
-所有配置都在 `[project_agent]` 下，并支持环境变量。
-
-| 配置 | 环境变量 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `memory_enabled` | `PROJECT_AGENT_MEMORY_ENABLED` | `true` | 是否启用 memory 系统 |
-| `memory_dir` | `PROJECT_AGENT_MEMORY_DIR` | `<workspace_root>/.project_agent/memory` | memory 文件目录，必须在 workspace 内 |
-| `memory_entrypoint_max_lines` | `PROJECT_AGENT_MEMORY_ENTRYPOINT_MAX_LINES` | `200` | 注入 `MEMORY.md` 的最大行数 |
-| `memory_entrypoint_max_bytes` | `PROJECT_AGENT_MEMORY_ENTRYPOINT_MAX_BYTES` | `25000` | 注入 `MEMORY.md` 的最大字节数 |
-| `memory_max_manifest_files` | `PROJECT_AGENT_MEMORY_MAX_MANIFEST_FILES` | `50` | 每轮最多扫描多少个 topic manifest |
-| `memory_max_relevant_files` | `PROJECT_AGENT_MEMORY_MAX_RELEVANT_FILES` | `3` | 每轮最多召回多少个 topic memory 文件 |
-| `memory_max_relevant_file_chars` | `PROJECT_AGENT_MEMORY_MAX_RELEVANT_FILE_CHARS` | `3000` | 每个 recalled topic 文件最多注入多少字符 |
-
-完整示例：
+配置文件使用 `[project_agent]`：
 
 ```toml
 [project_agent]
 memory_enabled = true
-memory_dir = ".project_agent/memory"
-
-memory_entrypoint_max_lines = 200
-memory_entrypoint_max_bytes = 25000
-
+memory_use_enabled = true
+memory_generate_enabled = true
+memory_idle_minutes = 30
+memory_max_sessions_per_pass = 5
+memory_max_unused_days = 30
+memory_prompt_max_chars = 12000
 memory_max_manifest_files = 50
 memory_max_relevant_files = 3
 memory_max_relevant_file_chars = 3000
+memory_entrypoint_max_lines = 200
+memory_entrypoint_max_bytes = 25000
 ```
 
-## 13. 当前未实现的能力
+对应环境变量为 `PROJECT_AGENT_` 加配置名大写，例如 `PROJECT_AGENT_MEMORY_MAX_UNUSED_DAYS=60`。优先级仍为调用覆盖值 > 环境变量 > TOML > 默认值。
 
-当前版本暂未实现：
+use 控制召回，generate 控制后台生成和 remember 工具，两者独立。关闭总开关或生成开关期间保存的会话会持久标记为不参与提取，之后开启生成也不会追溯提取该会话；要重新参与请新建会话。
 
-1. 自动后台记忆提取。
-2. Session Memory 摘要文件。
-3. user / project / local 多层 memory scope。
-4. Agent Memory Snapshot。
-5. Team Memory Sync。
-6. 向量检索。
-7. 专用 memory read/write/edit tool。
-8. memory UI 文件选择器。
+记忆提示词预算还受上下文窗口大小约束。提取、合并和召回暂时共用模型配置，没有独立向量数据库。未配置真实模型时，Mock 提取返回空列表，不能用于评估语义记忆质量。
 
-当前版本定位是基础文件化 memory substrate：
+## CLI
 
-```text
-文件化存储
-+ MEMORY.md 索引
-+ topic markdown
-+ 大模型驱动 relevant recall
-+ 召回内容 prompt 注入
-+ 每轮 recall 一次并复用
-+ 终端显示 recall 结果
-+ 配置化截断保护
+```bash
+# 同步处理符合空闲条件的历史会话
+project-agent memory refresh
+
+# 跳过空闲等待，仍跳过活跃、已处理、排除的会话
+project-agent memory refresh --force
+
+# 查看已登记主题及归档、固定状态
+project-agent memory list
+
+# 固定或取消固定主题
+project-agent memory pin testing
+project-agent memory pin testing --unpin
+
+# 删除主题并阻止同主题自动重新生成
+project-agent memory forget testing
 ```
+
+refresh 输出 extracted、rejected、merged、deferred、archived、skipped、failed 计数；rejected 表示本次新提取中原文不匹配而丢弃的候选数，不计为 failed。有失败时退出码为 1。后台异常只记日志，不阻断正常任务。明显凭证的规则检查不等于完整 DLP，仍不应主动向记忆中提交敏感信息。

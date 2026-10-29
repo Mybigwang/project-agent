@@ -21,7 +21,7 @@ class RecallModelClient:
         stream_callback: object | None = None,
     ) -> Message | SkillCall | tuple[ToolCall, ...]:
         del messages, tools, stream_callback
-        return Message(role="assistant", content='{"files":["auth.md"]}')
+        return Message(role="assistant", content='{"files":["topics/auth.md"]}')
 
 
 class EmptyRecallModelClient:
@@ -41,12 +41,11 @@ class EmptyRecallModelClient:
 def test_memory_context_builder_builds_prompt_with_recalled_file(
     tmp_path: Path,
 ) -> None:
+    (tmp_path / "topics").mkdir()
     (tmp_path / "MEMORY.md").write_text(
-        "- [Auth](auth.md) — login decisions", encoding="utf-8"
+        "- [Auth](topics/auth.md) — login decisions", encoding="utf-8"
     )
-    (tmp_path / "auth.md").write_text(
-        "# Auth\n\nOAuth login decisions", encoding="utf-8"
-    )
+    (tmp_path / "topics/auth.md").write_text("# Auth\n\nOAuth login decisions", encoding="utf-8")
     builder = MemoryContextBuilder(
         store=FileMemoryStore(memory_dir=tmp_path),
         recall=ModelMemoryRecall(model_client=RecallModelClient()),
@@ -59,9 +58,9 @@ def test_memory_context_builder_builds_prompt_with_recalled_file(
 
     context = builder.build(user_input="explain oauth login")
 
-    assert "- [Auth](auth.md)" in context.prompt
-    assert "## Relevant memory: auth.md" in context.prompt
-    assert tuple(file.relative_path for file in context.relevant_files) == ("auth.md",)
+    assert "- [Auth](topics/auth.md)" in context.prompt
+    assert "## Relevant memory: topics/auth.md" in context.prompt
+    assert tuple(file.relative_path for file in context.relevant_files) == ("topics/auth.md",)
 
 
 def test_memory_context_builder_initializes_empty_memory_dir(tmp_path: Path) -> None:

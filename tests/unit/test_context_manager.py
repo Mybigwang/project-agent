@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import pytest
+
 from project_agent.core.types import (
     AutoCompactionState,
     BudgetSnapshot,
@@ -126,3 +128,34 @@ def test_context_manager_full_compaction_trims_after_summary_insertion_to_fit_bu
     assert prepared_state.latest_budget is not None
     assert prepared_state.latest_budget.fill_ratio <= 1
     assert len(prepared_messages) <= 3
+
+
+@pytest.mark.parametrize("full_compaction", [False, True])
+def test_memory_and_latest_request_survive_compaction_when_they_fit(full_compaction: bool) -> None:
+    manager = ContextManager(
+        budget_estimator=CountingBudgetEstimator(),
+        micro_compactor=MicroCompactor(recent_tool_results_keep=5, tool_result_preview_chars=60),
+        auto_compaction_policy=AutoCompactionPolicy(
+            trigger_fill_ratio=0.9,
+            recover_fill_ratio=0.8,
+            circuit_breaker_failures=3,
+        ),
+        summary_builder=StaticSummaryBuilder(),
+        context_window_tokens=3,
+        profile="compact-default",
+        version="v1",
+        enable_auto_compaction=not full_compaction,
+        enable_full_compaction=full_compaction,
+    )
+    memory = Message(role="system", content="# Persistent Memory\nUse UTC.")
+    latest = Message(role="user", content="Run the date tests")
+    messages = (
+        Message(role="system", content="Rules"),
+        memory,
+        *(_message(i) for i in range(10)),
+        latest,
+    )
+    prepared, _ = manager.prepare_messages(messages=messages, task_plan=None, existing_state=None)
+    assert memory in prepared
+    assert latest in prepared
+    assert len(prepared) <= 3

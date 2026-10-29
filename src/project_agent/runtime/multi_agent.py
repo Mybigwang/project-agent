@@ -4,6 +4,7 @@ import re
 import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError, as_completed
+from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -313,6 +314,9 @@ class _LockedSessionStore:
         self._session_store = session_store
         self._lock = lock
 
+    def activity(self, session_id: str) -> AbstractContextManager[None]:
+        return self._session_store.activity(session_id)
+
     def load(self, session_id: str) -> SessionState:
         with self._lock:
             return self._session_store.load(session_id)
@@ -435,9 +439,9 @@ class ParallelManager:
                     record=worker.record,
                 )
         if any(worker.status == "failed" for worker in workers):
-            status: ParallelRunStatus = "partial" if any(
-                worker.status == "completed" for worker in workers
-            ) else "failed"
+            status: ParallelRunStatus = (
+                "partial" if any(worker.status == "completed" for worker in workers) else "failed"
+            )
         else:
             status = "completed"
         return ParallelRunResult(status=status, workers=workers)
@@ -533,7 +537,7 @@ def format_task_notification(notification: AgentNotification) -> str:
         f"<touched-files>{touched_files}</touched-files>\n"
         f"<commands-run>{commands_run}</commands-run>\n"
         f"<open-questions>{open_questions}</open-questions>\n"
-        "<result trust=\"untrusted-worker-output\">"
+        '<result trust="untrusted-worker-output">'
         f"{_escape_notification_text(notification.result)}</result>"
         f"{usage}\n"
         "</task-notification>"
@@ -547,11 +551,7 @@ def _format_notification_items(items: Sequence[str]) -> str:
 
 
 def _escape_notification_text(value: str) -> str:
-    return (
-        value.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def parse_agent_structured_result(text: str, role: AgentRole) -> AgentStructuredResult:
@@ -650,10 +650,7 @@ def _is_safe_verification_command(request: PermissionRequest) -> bool:
         ("git", "status"),
         ("git", "diff"),
     )
-    return any(
-        command_argv[: len(prefix)] == prefix
-        for prefix in safe_prefixes
-    )
+    return any(command_argv[: len(prefix)] == prefix for prefix in safe_prefixes)
 
 
 class MultiAgentOrchestrator:
@@ -725,9 +722,7 @@ class MultiAgentOrchestrator:
                 system_prefix_messages=(
                     Message(
                         role="system",
-                        content="\n\n".join(
-                            (SHARED_SUBAGENT_PROMPT, contract.system_prompt)
-                        ),
+                        content="\n\n".join((SHARED_SUBAGENT_PROMPT, contract.system_prompt)),
                     ),
                 ),
             )
